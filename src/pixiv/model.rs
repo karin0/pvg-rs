@@ -1,7 +1,15 @@
+use serde::de::value::MapDeserializer;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 pub type IllustId = u32;
 pub type PageNum = u32;
+
+pub type Response = Map<String, Value>;
+
+pub fn from_response<'de, T: Deserialize<'de>>(resp: Response) -> Result<T, serde_json::Error> {
+    T::deserialize(MapDeserializer::new(resp.into_iter()))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ImageUrls {
@@ -41,4 +49,16 @@ pub struct Illust {
     pub meta_pages: Vec<MetaPage>,
     pub tags: Vec<Tag>,
     pub sanity_level: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthSuccess {
+    pub response: AuthResponse,
 }

@@ -1,4 +1,3 @@
-use crate::PageNum;
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::from_str;
