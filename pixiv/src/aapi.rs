@@ -1,7 +1,7 @@
-use crate::pixiv::client::{ApiState, Client};
-use crate::pixiv::endpoint::Endpoint;
-use crate::pixiv::error::Result;
-use crate::pixiv::model::{Illust, Response};
+use crate::client::{ApiState, Client};
+use crate::endpoint::Endpoint;
+use crate::error::Result;
+use crate::model::{Illust, Response};
 use reqwest::RequestBuilder;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;

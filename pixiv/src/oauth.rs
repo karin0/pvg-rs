@@ -1,5 +1,5 @@
-use crate::pixiv::error::{Error, Result};
-use crate::pixiv::model::{Response, User};
+use crate::error::{Error, Result};
+use crate::model::{Response, User};
 use log::info;
 use md5::{digest::Update, Digest, Md5};
 use once_cell::sync::Lazy;

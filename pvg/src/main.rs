@@ -1,20 +1,19 @@
 mod config;
 mod model;
-mod pixiv;
 
 use crate::config::{read_config, Config};
 use crate::model::IllustIndex;
-use crate::pixiv::client::AuthedClient;
-use crate::pixiv::{IllustId, PageNum};
 use actix_cors::Cors;
 use actix_web::{get, post, web, App, HttpServer, Responder};
 use anyhow::Result;
 use parking_lot::RwLock;
+use pixiv::client::AuthedClient;
+use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::io;
 use std::path::PathBuf;
-use time::Instant;
+use tokio::time::Instant;
 
 #[macro_use]
 extern crate log;
@@ -71,12 +70,7 @@ impl Pvg {
             .collect();
         let t = now.elapsed();
         drop(index);
-        info!(
-            "{:?} -> {} results, {} ms",
-            filters,
-            r.len(),
-            t.whole_milliseconds(),
-        );
+        info!("{:?} -> {} results, {} ms", filters, r.len(), t.as_millis(),);
         SelectResponse { items: r }
     }
 }

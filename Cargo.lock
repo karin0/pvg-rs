@@ -1071,6 +1071,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "pixiv"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "md-5",
+ "once_cell",
+ "pretty_env_logger",
+ "reqwest",
+ "serde",
+ "serde-aux",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "typed-builder",
+ "url",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1112,19 +1131,12 @@ dependencies = [
  "anyhow",
  "either",
  "log",
- "md-5",
- "once_cell",
  "parking_lot",
+ "pixiv",
  "pretty_env_logger",
- "reqwest",
  "serde",
- "serde-aux",
  "serde_json",
- "thiserror",
- "time",
  "tokio",
- "typed-builder",
- "url",
 ]
 
 [[package]]
@@ -1619,9 +1631,9 @@ checksum = "dcc811dc4066ac62f84f11307873c4850cb653bfa9b1719cee2bd2204a4bc5dd"
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.21"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "854cbdc4f7bc6ae19c820d44abdc3277ac3e1b2b93db20a636825d9322fb60e6"
+checksum = "5c5713f0fc4b5db668a2ac63cdb7bb4469d8c9fed047b1d0292cc7b0ce2ba921"
 dependencies = [
  "tinyvec",
 ]

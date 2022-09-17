@@ -1,7 +1,7 @@
-use crate::pixiv::endpoint::{ApiEndpoint, Endpoint};
-use crate::pixiv::model::{from_response, Response};
-use crate::pixiv::oauth::{auth, AuthSuccess};
-use crate::pixiv::Result;
+use crate::endpoint::{ApiEndpoint, Endpoint};
+use crate::error::Result;
+use crate::model::{from_response, Response};
+use crate::oauth::{auth, AuthSuccess};
 use log::info;
 use reqwest::{Client as Http, RequestBuilder};
 use std::cmp::max;

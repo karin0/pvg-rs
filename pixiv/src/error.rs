@@ -1,4 +1,4 @@
-use crate::pixiv::model::Response;
+use crate::model::Response;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

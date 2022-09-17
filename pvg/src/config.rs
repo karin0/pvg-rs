@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::from_str;
-use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 

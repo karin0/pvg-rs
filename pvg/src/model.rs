@@ -1,8 +1,8 @@
-use crate::pixiv::model as api;
-use crate::IllustId;
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use aho_corasick::AhoCorasickBuilder;
 use anyhow::{Context, Result};
 use either::Either;
+use pixiv::model as api;
+use pixiv::IllustId;
 use serde::de::value::MapDeserializer;
 use serde::Deserialize;
 use serde_json::{from_str, Map, Value};
@@ -46,19 +46,17 @@ impl Page {
     }
 }
 
-impl api::Illust {
-    fn nsfw(&self) -> bool {
-        self.sanity_level >= 6
-    }
-}
-
 fn make_intro(data: &api::Illust) -> String {
     let mut s = format!("{}\\{}", data.title, data.user.name);
     for t in &data.tags {
         s.push('\\');
         s.push_str(&t.name);
     }
-    s.push_str(if data.nsfw() { "\\$nsfw" } else { "\\$sfw" });
+    s.push_str(if data.sanity_level >= 6 {
+        "\\$nsfw"
+    } else {
+        "\\$sfw"
+    });
     s
 }
 
