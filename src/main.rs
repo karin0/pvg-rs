@@ -4,6 +4,7 @@ mod pixiv;
 
 use crate::config::{read_config, Config};
 use crate::model::IllustIndex;
+use crate::pixiv::client::AuthedClient;
 use crate::pixiv::{IllustId, PageNum};
 use actix_cors::Cors;
 use actix_web::{get, post, web, App, HttpServer, Responder};
@@ -17,12 +18,12 @@ use time::Instant;
 
 #[macro_use]
 extern crate log;
-extern crate core;
 
 #[derive(Debug)]
 struct Pvg {
     conf: Config,
     index: RwLock<IllustIndex>,
+    api: RwLock<AuthedClient>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,10 +111,12 @@ async fn main() -> Result<()> {
     info!("config: {:?}", config);
     let nav = IllustIndex::new(&config.db_file).await?;
     info!("index got {} illusts", nav.map.len());
+    let api = AuthedClient::new(&config.refresh_token).await?;
 
     let data = Pvg {
         conf: config,
         index: RwLock::new(nav),
+        api: RwLock::new(api),
     };
     let data = web::Data::new(data);
     HttpServer::new(move || {

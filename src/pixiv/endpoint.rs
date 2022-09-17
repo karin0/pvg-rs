@@ -38,8 +38,10 @@ impl Endpoint for SimpleEndpoint {
     }
 }
 
+#[derive(Debug)]
 pub struct ApiEndpoint {
     pub auth: SimpleEndpoint,
+    pub user_bookmarks_illust: SimpleEndpoint,
 }
 
 impl ApiEndpoint {
@@ -51,6 +53,7 @@ impl ApiEndpoint {
         let oauth = Version::new(oauth_host);
         Ok(Self {
             auth: oauth.post("auth/token")?,
+            user_bookmarks_illust: appv1.get("user/bookmarks/illust")?,
         })
     }
 

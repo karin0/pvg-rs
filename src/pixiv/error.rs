@@ -10,8 +10,6 @@ pub enum Error {
     Pixiv(Response),
     #[error("auth failed")]
     Auth(u16, String),
-    #[error("unauthed")]
-    Unauthed(),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,5 +1,6 @@
 use serde::de::value::MapDeserializer;
 use serde::Deserialize;
+use serde_aux::field_attributes::deserialize_number_from_string;
 use serde_json::{Map, Value};
 
 pub type IllustId = u32;
@@ -31,8 +32,10 @@ pub struct Tag {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct User {
+    // id is typed number in user_bookmarks_illust, but string in auth.
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub id: u32,
     pub name: String,
 }
@@ -49,16 +52,4 @@ pub struct Illust {
     pub meta_pages: Vec<MetaPage>,
     pub tags: Vec<Tag>,
     pub sanity_level: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_in: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthSuccess {
-    pub response: AuthResponse,
 }
