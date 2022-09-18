@@ -1,79 +1,18 @@
 mod config;
+mod core;
 mod model;
 
-use crate::config::{read_config, Config};
-use crate::model::IllustIndex;
+use crate::core::Pvg;
 use actix_cors::Cors;
 use actix_web::{get, post, web, App, HttpServer, Responder};
 use anyhow::Result;
-use parking_lot::RwLock;
-use pixiv::client::AuthedClient;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
-use serde_json::{Number, Value};
+use serde_json::Value;
 use std::io;
-use std::path::PathBuf;
-use tokio::time::Instant;
 
 #[macro_use]
 extern crate log;
-
-#[derive(Debug)]
-struct Pvg {
-    conf: Config,
-    index: RwLock<IllustIndex>,
-    api: RwLock<AuthedClient>,
-}
-
-#[derive(Debug, Serialize)]
-struct SelectResponse {
-    items: Vec<Vec<Value>>,
-}
-
-impl Pvg {
-    fn get_file(&self, iid: IllustId, pn: PageNum) -> Option<PathBuf> {
-        let index = self.index.read();
-        let file = &index.map.get(&iid)?.pages.get(pn as usize)?.filename;
-        let res = self.conf.pix_dir.join(file);
-        drop(index);
-        Some(res)
-    }
-
-    fn select(&self, filters: &[String]) -> SelectResponse {
-        let index = self.index.read();
-        let now = Instant::now();
-        let r: Vec<Vec<Value>> = index
-            .select(filters)
-            .flat_map(|illust| {
-                illust.pages.iter().enumerate().map(|(i, page)| {
-                    vec![
-                        Value::Number(Number::from(illust.data.id)),
-                        Value::Number(Number::from(i)),
-                        Value::String("img".to_string()),
-                        Value::Number(Number::from(page.width)),
-                        Value::Number(Number::from(page.height)),
-                        Value::String(illust.data.title.clone()),
-                        Value::String(illust.data.user.name.clone()),
-                        Value::Number(Number::from(illust.data.user.id)),
-                        Value::Array(
-                            illust
-                                .data
-                                .tags
-                                .iter()
-                                .map(|t| Value::String(t.name.clone()))
-                                .collect(),
-                        ),
-                        Value::String(page.filename.clone()),
-                    ]
-                })
-            })
-            .collect();
-        let t = now.elapsed();
-        drop(index);
-        info!("{:?} -> {} results, {} ms", filters, r.len(), t.as_millis(),);
-        SelectResponse { items: r }
-    }
-}
 
 #[get("/img/{iid}/{pn}")]
 async fn image(app: web::Data<Pvg>, path: web::Path<(IllustId, PageNum)>) -> impl Responder {
@@ -84,6 +23,11 @@ async fn image(app: web::Data<Pvg>, path: web::Path<(IllustId, PageNum)>) -> imp
     }
 }
 
+#[derive(Debug, Serialize)]
+struct SelectResponse {
+    items: Vec<Vec<Value>>,
+}
+
 #[derive(Deserialize, Debug)]
 struct SelectPayload {
     filters: Vec<String>,
@@ -91,7 +35,9 @@ struct SelectPayload {
 
 #[post("/select")]
 async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl Responder {
-    web::Json(app.select(&filters.filters))
+    web::Json(SelectResponse {
+        items: app.select(&filters.filters),
+    })
 }
 
 #[actix_web::main] // or #[tokio::main]
@@ -101,18 +47,7 @@ async fn main() -> Result<()> {
     }
     pretty_env_logger::init_timed();
 
-    let config = read_config().await?;
-    info!("config: {:?}", config);
-    let nav = IllustIndex::new(&config.db_file).await?;
-    info!("index got {} illusts", nav.map.len());
-    let api = AuthedClient::new(&config.refresh_token).await?;
-
-    let data = Pvg {
-        conf: config,
-        index: RwLock::new(nav),
-        api: RwLock::new(api),
-    };
-    let data = web::Data::new(data);
+    let data = web::Data::new(Pvg::new().await?);
     HttpServer::new(move || {
         App::new()
             .wrap(Cors::permissive())
