@@ -1,6 +1,6 @@
 use crate::endpoint::{ApiEndpoint, Endpoint};
 use crate::error::Result;
-use crate::model::{from_response, Response};
+use crate::model::{from_response, Response, User};
 use crate::oauth::{auth, AuthSuccess};
 use log::info;
 use reqwest::{Client as Http, RequestBuilder};
@@ -13,6 +13,7 @@ pub struct AuthedState {
     pub access_header: String,
     pub refresh_token: String,
     pub expires_at: Instant,
+    pub user: User,
 }
 
 #[derive(Debug)]
@@ -48,6 +49,7 @@ impl AuthedState {
             access_header: format!("Bearer {}", resp.access_token),
             refresh_token: resp.refresh_token,
             expires_at: res.time + Duration::from_secs(max(0, resp.expires_in - 30) as u64),
+            user: resp.user,
         })
     }
 

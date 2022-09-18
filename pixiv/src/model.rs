@@ -53,3 +53,9 @@ pub struct Illust {
     pub tags: Vec<Tag>,
     pub sanity_level: u32,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct UserBookmarksIllust {
+    pub illusts: Vec<Illust>,
+    pub next_url: Option<String>,
+}

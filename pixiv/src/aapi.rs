@@ -1,30 +1,29 @@
 use crate::client::{ApiState, Client};
 use crate::endpoint::Endpoint;
-use crate::error::Result;
-use crate::model::{Illust, Response};
-use reqwest::RequestBuilder;
+use crate::error::{Error, Result};
+use log::info;
+use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
-use typed_builder::TypedBuilder;
+use strum_macros::IntoStaticStr;
+use url::Url;
 
 async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
-    Ok(req.send().await?.json().await?)
+    info!("sending: {:?}", req);
+    let r = req.send().await?;
+    let st = r.status();
+    info!("got status: {:?}", st);
+    if st.is_success() || st.is_redirection() {
+        Ok(r.json().await?)
+    } else {
+        Err(Error::Pixiv(st.as_u16(), r.text().await?))
+    }
 }
 
-#[derive(Debug, TypedBuilder)]
-pub struct UserBookmarksIllust<'a> {
-    #[builder(setter(into))]
-    pub user_id: &'a str,
-    #[builder(default = "public")]
-    pub restrict: &'a str,
-    #[builder(default = "for_ios")]
-    pub filter: &'a str,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct UserBookmarksIllustResponse {
-    pub illusts: Vec<Illust>,
-    pub next_url: Option<String>,
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum BookmarkRestrict {
+    Public,
+    Private,
 }
 
 impl<S: ApiState> Client<S> {
@@ -32,11 +31,19 @@ impl<S: ApiState> Client<S> {
         self.call(endpoint).header("host", "app-api.pixiv.net")
     }
 
-    pub async fn user_bookmarks_illust(&self, i: UserBookmarksIllust<'_>) -> Result<Response> {
+    pub async fn next<T: DeserializeOwned>(&self, next_url: &str) -> Result<T> {
+        fin(self.app(&(Method::GET, Url::parse(next_url)?))).await
+    }
+
+    pub async fn user_bookmarks_illust<T: DeserializeOwned>(
+        &self,
+        user_id: &str,
+        restrict: BookmarkRestrict,
+    ) -> Result<T> {
         fin(self.app(&self.api.user_bookmarks_illust).query(&[
-            ("user_id", i.user_id),
-            ("restrict", i.restrict),
-            ("filter", i.filter),
+            ("user_id", user_id),
+            ("restrict", restrict.into()),
+            ("filter", "for_ios"),
         ]))
         .await
     }

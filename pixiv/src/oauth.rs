@@ -39,9 +39,10 @@ pub async fn auth(req: RequestBuilder, refresh_token: &str) -> Result<Response> 
     let code = res.status().as_u16();
     let text = res.text().await?;
     info!("auth: {} {}", code, text);
+    // pixivpy_async
     match code {
         200 | 301 | 302 => Ok(from_str(&text)?),
-        _ => Err(Error::Auth(code, text)),
+        _ => Err(Error::Pixiv(code, text)),
     }
 }
 
