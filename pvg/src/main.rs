@@ -10,6 +10,8 @@ use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 #[macro_use]
 extern crate log;
@@ -40,6 +42,14 @@ async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl 
     })
 }
 
+#[get("/test")]
+async fn test(app: web::Data<Pvg>) -> impl Responder {
+    let t = Instant::now();
+    app.dump().await.unwrap();
+    info!("dump: {} ms", t.elapsed().as_millis());
+    "ok"
+}
+
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
@@ -48,17 +58,43 @@ async fn main() -> Result<()> {
     pretty_env_logger::init_timed();
 
     let data = web::Data::new(Pvg::new().await?);
-    HttpServer::new(move || {
+    let pvg = data.clone();
+    let server = HttpServer::new(move || {
         App::new()
             .wrap(Cors::permissive())
             .app_data(data.clone())
             .service(image)
             .service(select)
+            .service(test)
     })
     .bind(("127.0.0.1", 5678))?
-    .run()
-    .await
-    .unwrap();
+    .disable_signals()
+    .run();
+    let handle = server.handle();
 
+    let (tx, mut rx) = oneshot::channel();
+    let mut tx = Some(tx);
+    ctrlc::set_handler(move || match tx.take() {
+        Some(tx) => {
+            if tx.send(()).is_err() {
+                error!("failed to invoke shutdown");
+            } else {
+                info!("shutting down");
+            }
+        }
+        None => {
+            warn!("is shutting down");
+        }
+    })?;
+
+    tokio::select! {
+        _ = server => {
+            error!("server terminated unexpectedly");
+        },
+        _ = &mut rx => {}
+    }
+    pvg.dump().await?;
+    info!("shutting down server");
+    handle.stop(true).await;
     Ok(())
 }

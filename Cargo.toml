@@ -4,3 +4,6 @@ members = [
     "pvg",
     "pixiv",
 ]
+
+[profile.release]
+debug = true

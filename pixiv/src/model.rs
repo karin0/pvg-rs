@@ -12,22 +12,22 @@ pub fn from_response<'de, T: Deserialize<'de>>(resp: Response) -> Result<T, serd
     T::deserialize(MapDeserializer::new(resp.into_iter()))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ImageUrls {
     pub original: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MetaPage {
     pub image_urls: ImageUrls,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MetaSinglePage {
     pub original_image_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Tag {
     pub name: String,
 }
@@ -38,9 +38,10 @@ pub struct User {
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub id: u32,
     pub name: String,
+    pub account: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Illust {
     pub id: IllustId,
     pub title: String,
@@ -54,7 +55,7 @@ pub struct Illust {
     pub sanity_level: u32,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct UserBookmarksIllust {
     pub illusts: Vec<Illust>,
     pub next_url: Option<String>,

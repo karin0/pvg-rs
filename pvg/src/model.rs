@@ -7,11 +7,8 @@ use serde::de::value::MapDeserializer;
 use serde::Deserialize;
 use serde_json::{from_str, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::ErrorKind;
-use std::path::Path;
-use tokio::fs;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Page {
     pub url: String,
     pub filename: String,
@@ -19,7 +16,7 @@ pub struct Page {
     pub height: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Illust {
     pub(crate) data: api::Illust,
     raw_data: Map<String, Value>,
@@ -27,7 +24,7 @@ pub struct Illust {
     intro: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
     pub ids: Vec<IllustId>, // TODO: store pointers to speed up?
@@ -114,35 +111,31 @@ impl Illust {
 }
 
 impl IllustIndex {
-    pub async fn new(file: &Path) -> Result<Self> {
-        let s = fs::read_to_string(file).await;
-        match s {
-            Ok(s) => {
-                info!("read {} bytes", s.len());
-                let illusts: Vec<Map<String, Value>> = from_str(&s)?;
-                let mut ids = Vec::with_capacity(illusts.len());
-                info!("parsed {} objects", illusts.len());
+    pub fn parse(s: String) -> serde_json::error::Result<Self> {
+        let illusts: Vec<Map<String, Value>> = from_str(&s)?;
+        let mut ids = Vec::with_capacity(illusts.len());
+        info!("parsed {} objects", illusts.len());
 
-                let map = HashMap::from_iter(illusts.into_iter().map(|data| {
-                    // FIXME: do not unwrap
-                    let o = Illust::new(data).unwrap();
-                    ids.push(o.data.id);
-                    (o.data.id, o)
-                }));
+        let map = HashMap::from_iter(illusts.into_iter().map(|data| {
+            // FIXME: do not unwrap
+            let o = Illust::new(data).unwrap();
+            ids.push(o.data.id);
+            (o.data.id, o)
+        }));
 
-                Ok(Self { map, ids })
-            }
-            Err(e) => {
-                if e.kind() == ErrorKind::NotFound {
-                    Ok(Self {
-                        map: HashMap::new(),
-                        ids: Vec::new(),
-                    })
-                } else {
-                    Err(e.into())
-                }
-            }
-        }
+        Ok(Self { map, ids })
+    }
+
+    pub fn dump(&self) -> serde_json::error::Result<Vec<u8>> {
+        // FIXME: serde can't do async streaming for now.
+        info!("collecting {} illlusts", self.len());
+        let v = self.iter().map(|i| &i.raw_data).collect::<Vec<_>>();
+        info!("dumping {} illlusts", v.len());
+        serde_json::to_vec(&v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
     }
 
     fn iter(&self) -> impl Iterator<Item = &Illust> {

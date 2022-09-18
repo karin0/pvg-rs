@@ -1,33 +1,82 @@
 use crate::config::{read_config, Config};
 use crate::model::IllustIndex;
 use anyhow::Result;
+use fs2::FileExt;
 use parking_lot::RwLock;
 use pixiv::client::AuthedClient;
 use pixiv::{IllustId, PageNum};
 use serde_json::{Number, Value};
+use std::io::Read;
 use std::path::PathBuf;
 use tokio::time::Instant;
 
 #[derive(Debug)]
 pub struct Pvg {
     conf: Config,
+    lock: std::fs::File,
     index: RwLock<IllustIndex>,
     api: RwLock<AuthedClient>,
+    disk: tokio::sync::Mutex<()>,
 }
 
 impl Pvg {
     pub async fn new() -> Result<Self> {
+        let t = Instant::now();
         let config = read_config().await?;
         info!("config: {:?}", config);
-        let nav = IllustIndex::new(&config.db_file).await?;
-        info!("index got {} illusts", nav.map.len());
+        // XXX: using sync files since fs2 doesn't support async
+        let (nav, lock) = match std::fs::File::open(&config.db_file) {
+            Ok(mut db) => {
+                db.try_lock_exclusive()?;
+                let mut s = String::new();
+                db.read_to_string(&mut s)?;
+                info!("read {} bytes from {:?}", s.len(), db);
+                let nav = IllustIndex::parse(s)?;
+                (nav, db)
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    info!("creating new db file");
+                    let lock = std::fs::OpenOptions::new()
+                        .create_new(true)
+                        .open(&config.db_file)?;
+                    lock.try_lock_exclusive()?;
+                    (IllustIndex::default(), lock)
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
+        info!(
+            "index: {} illusts in {} ms",
+            nav.len(),
+            t.elapsed().as_millis()
+        );
         let api = AuthedClient::new(&config.refresh_token).await?;
+        info!("api: {} {}", api.state.user.name, api.state.user.id);
 
         Ok(Pvg {
             conf: config,
+            lock,
             index: RwLock::new(nav),
             api: RwLock::new(api),
+            disk: tokio::sync::Mutex::new(()),
         })
+    }
+
+    pub async fn dump(&self) -> Result<()> {
+        let index = self.index.read();
+        let s = index.dump()?;
+        drop(index);
+        let _ = self.disk.lock().await;
+        info!("writing {} bytes", s.len());
+        tokio::fs::write(&self.conf.db_file, s).await?;
+        info!("written into {:?}", self.conf.db_file);
+        Ok(())
+    }
+
+    pub async fn update(&self) -> Result<()> {
+        todo!()
     }
 
     pub fn get_file(&self, iid: IllustId, pn: PageNum) -> Option<PathBuf> {
