@@ -53,6 +53,7 @@ pub struct Illust {
     pub meta_pages: Vec<MetaPage>,
     pub tags: Vec<Tag>,
     pub sanity_level: u32,
+    pub visible: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]

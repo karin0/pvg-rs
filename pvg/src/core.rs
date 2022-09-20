@@ -1,16 +1,22 @@
 use crate::config::{read_config, Config};
 use crate::model::{DimCache, IllustIndex};
+use actix_web::web::Bytes;
 use anyhow::Result;
 use fs2::FileExt;
+use futures::{stream, Stream, StreamExt};
 use parking_lot::RwLock;
 use pixiv::aapi::BookmarkRestrict;
 use pixiv::client::{AuthedClient, AuthedState};
+use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
+use std::io;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 #[derive(Deserialize)]
@@ -32,6 +38,7 @@ pub struct Pvg {
     lock: std::fs::File,
     index: RwLock<IllustIndex>,
     api: tokio::sync::RwLock<AuthedClient>,
+    pixiv: DownloadClient,
     uid: String,
     disk: tokio::sync::Mutex<()>,
 }
@@ -40,6 +47,39 @@ pub struct Pvg {
 pub struct BookmarkPage {
     illusts: Vec<Map<String, Value>>,
     next_url: Option<String>,
+}
+
+#[derive(Debug)]
+struct DownloadingFile {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl DownloadingFile {
+    pub async fn new(path: PathBuf) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await?;
+        Ok(Self { path, file })
+    }
+
+    pub async fn write(&mut self, b: &Bytes) -> io::Result<()> {
+        self.file.write_all(b).await
+    }
+
+    pub async fn commit(self, path: &Path) -> io::Result<()> {
+        drop(self.file);
+        fs::rename(&self.path, path).await
+    }
+
+    pub async fn rollback(self) {
+        drop(self.file);
+        if let Err(e) = fs::remove_file(&self.path).await {
+            error!("{:?}: failed to remove failed temp: {}", self.path, e);
+        }
+    }
 }
 
 impl Pvg {
@@ -118,6 +158,7 @@ impl Pvg {
             api: tokio::sync::RwLock::new(api),
             disk: tokio::sync::Mutex::new(()),
             uid,
+            pixiv: DownloadClient::new(),
         })
     }
 
@@ -193,15 +234,79 @@ impl Pvg {
         Ok(())
     }
 
-    pub fn get_file(&self, iid: IllustId, pn: PageNum) -> Option<PathBuf> {
+    pub fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
         let index = self.index.read();
-        let file = &index.map.get(&iid)?.pages.get(pn as usize)?.filename;
-        let res = self.conf.pix_dir.join(file);
-        drop(index);
-        Some(res)
+        let pn: usize = pn.try_into().ok()?;
+        let src = &index.map.get(&iid)?.pages.get(pn)?.source;
+        let url = src.url.clone();
+        let path = self.conf.pix_dir.join(src.filename());
+        Some((url, path))
+    }
+
+    pub async fn download(
+        &self,
+        src: &str,
+        path: PathBuf,
+    ) -> Result<impl Stream<Item = pixiv::reqwest::Result<Bytes>>> {
+        info!("downloading {}", src);
+        let tmp_path = self.conf.tmp_dir.join(path.file_name().unwrap());
+        // TODO: this fails if a file is requested twice before it's downloaded, do some waiting.
+        // FIXME: this always fails if an old temp file is left behind.
+        let mut tmp = DownloadingFile::new(tmp_path).await?;
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<Bytes>>();
+
+        let npath = path.clone();
+        tokio::spawn(async move {
+            let path = npath;
+            while let Some(msg) = rx.recv().await {
+                if let Some(b) = msg {
+                    if let Err(e) = tmp.write(&b).await {
+                        error!("{:?}: failed to write temp: {}", path, e);
+                        tmp.rollback().await;
+                        return;
+                    }
+                } else {
+                    error!("{:?}: remote error", path);
+                    tmp.rollback().await;
+                    return;
+                }
+            }
+            info!("{:?}: committing", path);
+            if let Err(e) = tmp.commit(&path).await {
+                error!("{:?}: failed to save: {}", path, e);
+            }
+        });
+
+        let remote = self.pixiv.download(src).await?.bytes_stream();
+        Ok(stream::unfold(
+            (remote, tx, path),
+            |(mut remote, tx, path)| async move {
+                match remote.next().await {
+                    Some(Ok(b)) => {
+                        if let Err(e) = tx.send(Some(b.clone())) {
+                            error!("{:?}: send error: {}", path, e);
+                        }
+                        Some((Ok(b), (remote, tx, path)))
+                    }
+                    Some(Err(e)) => {
+                        error!("{:?}: remote streaming failed: {}", path, e);
+                        if let Err(e) = tx.send(None) {
+                            error!("{:?}: none send error: {}", path, e);
+                        }
+                        Some((Err(e), (remote, tx, path)))
+                    }
+                    None => {
+                        info!("{:?}: remote streaming done", path);
+                        drop(tx);
+                        None
+                    }
+                }
+            },
+        ))
     }
 
     pub fn select(&self, filters: &[String]) -> Vec<Vec<Value>> {
+        // TODO: do this all sync can block for long.
         let index = self.index.read();
         let now = Instant::now();
         let r: Vec<Vec<Value>> = index
@@ -213,7 +318,7 @@ impl Pvg {
                     if let Some(d) = page.dimensions {
                         dims = d;
                     } else {
-                        warn!("skipping unmeasured page {}", page.filename);
+                        warn!("skipping unmeasured page {}", page.source.filename());
                         return None;
                     }
                     Some(vec![
@@ -233,7 +338,7 @@ impl Pvg {
                                 .map(|t| Value::String(t.name.clone()))
                                 .collect(),
                         ),
-                        Value::String(page.filename.clone()),
+                        Value::String(page.source.filename().to_string()),
                     ])
                 })
             })

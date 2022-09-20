@@ -4,7 +4,11 @@ mod model;
 
 use crate::core::Pvg;
 use actix_cors::Cors;
-use actix_web::{get, post, web, App, HttpServer, Responder};
+use actix_files::NamedFile;
+use actix_web::http::StatusCode;
+use actix_web::{
+    get, post, web, App, Either, HttpResponse, HttpResponseBuilder, HttpServer, Responder,
+};
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
@@ -18,11 +22,28 @@ use tokio::time::Instant;
 extern crate log;
 
 #[get("/img/{iid}/{pn}")]
-async fn image(app: web::Data<Pvg>, path: web::Path<(IllustId, PageNum)>) -> impl Responder {
+async fn image(
+    app: web::Data<Pvg>,
+    path: web::Path<(IllustId, PageNum)>,
+) -> io::Result<Either<NamedFile, HttpResponse>> {
     let (iid, pn) = path.into_inner();
-    match app.get_file(iid, pn) {
-        Some(file) => actix_files::NamedFile::open_async(file).await,
-        None => Err(io::Error::new(io::ErrorKind::NotFound, "Not found")),
+    match app.get_source(iid, pn) {
+        Some((src, path)) => match NamedFile::open_async(&path).await {
+            Ok(f) => Ok(Either::Left(f)),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    // info!("refusing to download {:?}", path);
+                    // return Err(io::Error::new(io::ErrorKind::Other, "bye"));
+                    let resp = app.download(&src, path).await.map_err(mapper)?;
+                    Ok(Either::Right(
+                        HttpResponseBuilder::new(StatusCode::OK).streaming(resp),
+                    ))
+                } else {
+                    Err(e)
+                }
+            }
+        },
+        _ => Err(io::Error::new(io::ErrorKind::NotFound, "Not found")),
     }
 }
 
@@ -43,7 +64,8 @@ async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl 
     })
 }
 
-fn mapper(e: anyhow::Error) -> io::Error {
+fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
+    let e = e.into();
     error!("mapper: {:?}", e);
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }

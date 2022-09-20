@@ -19,5 +19,6 @@ aho-corasick = "0"
 actix-cors = "0"
 ctrlc = { version = "3", features = ["termination"] }
 fs2 = "0"
+futures = "0.3"
 
 pixiv = { path = "../pixiv" }

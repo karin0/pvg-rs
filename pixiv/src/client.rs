@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::model::{from_response, Response, User};
 use crate::oauth::{auth, AuthSuccess};
 use log::info;
+use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client as Http, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -72,19 +73,25 @@ pub type GuestClient = Client<GuestState>;
 
 impl<S: ApiState> Client<S> {
     fn make(state: S) -> Self {
+        let mut headers = HeaderMap::with_capacity(3);
+        headers.insert("app-os", HeaderValue::from_static("ios"));
+        headers.insert("app-os-version", HeaderValue::from_static("14.6"));
+
         Self {
-            http: Http::new(),
+            http: Http::builder()
+                .default_headers(headers)
+                .user_agent("PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
             api: ApiEndpoint::new(),
             state,
         }
     }
 
     fn guest_call(&self, endpoint: &impl Endpoint) -> RequestBuilder {
-        endpoint
-            .request(&self.http)
-            .header("app-os", "ios")
-            .header("app-os-version", "14.6")
-            .header("user-agent", "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)")
+        endpoint.request(&self.http)
     }
 
     pub(crate) fn call(&self, endpoint: &impl Endpoint) -> RequestBuilder {

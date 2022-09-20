@@ -21,9 +21,32 @@ impl Dimensions {
 }
 
 #[derive(Debug, Clone)]
-pub struct Page {
+pub struct Source {
     pub url: String,
-    pub filename: String,
+    p: u32,
+}
+
+impl TryFrom<String> for Source {
+    type Error = anyhow::Error;
+
+    fn try_from(url: String) -> Result<Self> {
+        let p = url.rfind('/').context("bad image url")?;
+        Ok(Self {
+            url,
+            p: p as u32 + 1,
+        })
+    }
+}
+
+impl Source {
+    pub fn filename(&self) -> &str {
+        &self.url[self.p as usize..]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Page {
+    pub source: Source,
     pub dimensions: Option<Dimensions>,
 }
 
@@ -44,11 +67,8 @@ pub struct IllustIndex {
 
 impl Page {
     pub fn new(url: String, dimensions: Option<Dimensions>) -> Result<Self> {
-        let p = url.rfind('/').context("bad image url")?;
-        let filename = url[p + 1..].to_string();
         Ok(Self {
-            url,
-            filename,
+            source: url.try_into()?,
             dimensions,
         })
     }
@@ -197,7 +217,23 @@ impl IllustIndex {
     pub fn stage(&mut self, illust: Map<String, Value>) -> Result<bool> {
         let illust = Illust::new(illust)?;
         let id = illust.data.id;
-        if self.map.insert(illust.data.id, illust).is_some() {
+        if !illust.data.visible {
+            let has = self.map.contains_key(&id);
+            if has {
+                warn!(
+                    "{} ({} - {}) is deleted from upstream, which has luckily been indexed.",
+                    id, illust.data.title, illust.data.user.name
+                );
+                return Ok(false);
+            }
+            warn!(
+                "{} ({} - {}) is deleted from upstream, which sadly hasn't been indexed.",
+                id, illust.data.title, illust.data.user.name
+            );
+            let r = self.map.insert(id, illust);
+            assert!(r.is_none());
+        } else if self.map.insert(illust.data.id, illust).is_some() {
+            // TODO: how to know if this illust is updated?
             return Ok(false);
         }
         self.staged.push(id);
