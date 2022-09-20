@@ -76,6 +76,12 @@ async fn quick_update(app: web::Data<Pvg>) -> io::Result<&'static str> {
     Ok("ok")
 }
 
+#[get("/action/download")]
+async fn download_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
+    app.download_all().await.map_err(mapper)?;
+    Ok("ok")
+}
+
 #[get("/test")]
 async fn test(app: web::Data<Pvg>) -> impl Responder {
     let t = Instant::now();
@@ -100,6 +106,7 @@ async fn main() -> Result<()> {
             .service(image)
             .service(select)
             .service(quick_update)
+            .service(download_all)
             .service(test)
     })
     .bind(("127.0.0.1", 5678))?

@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::Error;
-use log::{error, info};
+use log::error;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{header, Client, Response};
 use std::time::Duration;
@@ -42,7 +42,7 @@ impl DownloadClient {
     pub async fn download(&self, url: &str) -> Result<Response> {
         let r = self.client.get(url).send().await?;
         let st = r.status();
-        info!("{} from {}", st, url);
+        // info!("{} from {}", st, url);
         if st.is_success() || st.is_redirection() {
             Ok(r)
         } else {

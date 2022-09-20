@@ -61,8 +61,8 @@ pub struct Illust {
 #[derive(Debug, Default, Clone)]
 pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
-    pub ids: Vec<IllustId>, // TODO: store pointers to speed up?
-    pub staged: Vec<IllustId>,
+    ids: Vec<IllustId>, // TODO: store pointers to speed up?
+    staged: Vec<IllustId>,
 }
 
 impl Page {
@@ -210,7 +210,7 @@ impl IllustIndex {
         self.map.len()
     }
 
-    fn iter(&self) -> impl DoubleEndedIterator<Item = &Illust> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Illust> {
         self.ids.iter().map(move |id| &self.map[id])
     }
 
