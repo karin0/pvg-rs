@@ -1,15 +1,17 @@
 use crate::config::{read_config, Config};
-use crate::model::{DimCache, IllustIndex};
+use crate::model::{DimCache, Dimensions, IllustIndex};
 use actix_web::web::Bytes;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{stream, Stream, StreamExt};
+use image::GenericImageView;
 use parking_lot::{Mutex, RwLock};
 use pixiv::aapi::BookmarkRestrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::collections::HashSet;
@@ -438,6 +440,96 @@ impl Pvg {
         }
         if cnt_fail > 0 {
             bail!("{} downloads failed", cnt_fail);
+        }
+        Ok(())
+    }
+
+    fn _make_measure_queue(&self) -> (Vec<(IllustId, Vec<(PageNum, String)>)>, usize) {
+        let mut vec = vec![];
+        let mut n = 0;
+        let r: Vec<(_, Vec<(PageNum, String)>)> = self
+            .index
+            .read()
+            .iter()
+            .filter_map(|illust| {
+                vec.clear();
+                for (i, page) in illust.pages.iter().skip(1).enumerate() {
+                    if page.dimensions.is_none() {
+                        vec.push((i as PageNum + 1, page.source.filename().to_owned()));
+                    }
+                }
+                if vec.is_empty() {
+                    None
+                } else {
+                    n += vec.len();
+                    Some((illust.data.id, vec.clone()))
+                }
+            })
+            .collect();
+        info!("{} illusts has {} pages to measure", r.len(), n);
+        (r, n)
+    }
+
+    fn _set_dims(&self, iid: IllustId, pn: PageNum, dims: Dimensions) -> Result<()> {
+        self.index
+            .write()
+            .map
+            .get_mut(&iid)
+            .context("no such illust")?
+            .pages
+            .get_mut(pn as usize)
+            .context("no such page")?
+            .dimensions = Some(dims);
+        Ok(())
+    }
+
+    fn _measure(path: &Path) -> Result<Dimensions> {
+        let img = image::open(path)?;
+        let (w, h) = img.dimensions();
+        Ok(Dimensions(w.try_into()?, h.try_into()?))
+    }
+
+    pub async fn measure_all(&self) -> Result<()> {
+        // let _ = self.measure_all_lock.try_lock()?;
+        let t = Instant::now();
+        let (q, n) = self._make_measure_queue();
+        warn!("measure_all: blocked for {} ms", t.elapsed().as_millis());
+        info!("{} illusts to measure", q.len());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let base = self.conf.pix_dir.clone();
+        rayon::spawn(move || {
+            q.into_par_iter()
+                .flat_map(|(iid, vec)| vec.into_par_iter().map(move |(pn, v)| (iid, pn, v)))
+                .for_each(move |(iid, pn, filename)| {
+                    let file = base.join(filename);
+                    let r = Self::_measure(&file);
+                    if let Err(e) = tx.send((iid, pn, r)) {
+                        error!("{:?}: send error: {}", file, e);
+                    }
+                });
+        });
+
+        let mut cnt = 0;
+        let mut cnt_fail = 0;
+        while let Some((iid, pn, res)) = rx.recv().await {
+            cnt += 1;
+            match res {
+                Ok(dims) => match self._set_dims(iid, pn, dims) {
+                    Ok(_) => info!("{}/{}: measured {:?}", cnt, n, dims),
+                    Err(e) => {
+                        cnt_fail += 1;
+                        error!("{}/{}: set dims failed: {}", cnt, n, e);
+                    }
+                },
+                Err(e) => {
+                    cnt_fail += 1;
+                    error!("{}/{}: measure failed: {}", cnt, n, e);
+                }
+            }
+        }
+        if cnt_fail > 0 {
+            bail!("{} measures failed", cnt_fail);
         }
         Ok(())
     }

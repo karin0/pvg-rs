@@ -1,6 +1,7 @@
 /target
 .idea
-/config.json
 /tmp
 *.log
 *.env
+/home
+*.json
