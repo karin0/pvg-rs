@@ -51,6 +51,7 @@ pub struct Pvg {
     disk: tokio::sync::Mutex<()>,
     download_all_lock: tokio::sync::Mutex<()>,
     not_found: Mutex<HashSet<OsString>>,
+    db_init_size: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -169,6 +170,7 @@ impl Pvg {
         info!("api: {} {}", api.state.user.name, api.state.user.id);
         let uid = api.state.user.id.to_string();
 
+        let db_init_size = nav.len();
         Ok(Pvg {
             conf: config,
             lock,
@@ -179,14 +181,29 @@ impl Pvg {
             download_all_lock: Default::default(),
             disk: Default::default(),
             not_found: Mutex::new(not_found),
+            db_init_size,
         })
     }
 
-    fn dump_index(&self) -> Result<(Vec<u8>, DimCache)> {
+    fn dump_index(&self) -> Result<(Option<Vec<u8>>, DimCache)> {
         let index = self.index.read();
-        let s = index.dump()?;
+        let db;
+        if index.dirty {
+            db = Some(index.dump()?);
+        } else {
+            let n = index.len();
+            if n != self.db_init_size {
+                error!(
+                    "DB SIZE CHANGED WITHOUT DIRTY FLAG! {} -> {}",
+                    self.db_init_size, n
+                );
+                db = Some(index.dump()?);
+            } else {
+                db = None;
+            }
+        }
         let dims = index.dump_dims_cache();
-        Ok((s, dims))
+        Ok((db, dims))
     }
 
     fn dump_cache(&self, dims: DimCache, token: &AuthedState) -> serde_json::Result<String> {
@@ -209,10 +226,15 @@ impl Pvg {
     pub async fn dump(&self) -> Result<()> {
         let (s, dims) = self.dump_index()?;
         let _ = self.disk.lock().await;
-        fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak")).await?;
-        info!("writing {} bytes", s.len());
-        fs::write(&self.conf.db_file, s).await?;
-        info!("written into {:?}", self.conf.db_file);
+        if let Some(s) = s {
+            fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak")).await?;
+            info!("writing {} bytes", s.len());
+            fs::write(&self.conf.db_file, s).await?;
+            info!("written into {:?}", self.conf.db_file);
+            // TODO: mark index to be clean within the same guard
+        } else {
+            info!("index is clean");
+        }
         let api = self.api.read().await;
         let s = self.dump_cache(dims, &api.state)?;
         drop(api);

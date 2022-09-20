@@ -63,6 +63,8 @@ pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     staged: Vec<IllustId>,
+    pub dirty: bool,
+    stage_dirty: bool,
 }
 
 impl Page {
@@ -143,6 +145,8 @@ impl IllustIndex {
             map,
             ids,
             staged: vec![],
+            dirty: false,
+            stage_dirty: false,
         })
     }
 
@@ -234,8 +238,10 @@ impl IllustIndex {
             assert!(r.is_none());
         } else if self.map.insert(illust.data.id, illust).is_some() {
             // TODO: how to know if this illust is updated?
+            self.stage_dirty = true;
             return Ok(false);
         }
+        self.stage_dirty = true;
         self.staged.push(id);
         Ok(true)
     }
@@ -247,6 +253,10 @@ impl IllustIndex {
         let n = self.ids.len();
         self.ids.extend(self.staged.drain(..).rev());
         assert_eq!(self.ids.len(), n + delta);
+        if delta > 0 || self.stage_dirty {
+            self.dirty = true;
+        }
+        self.stage_dirty = false;
         delta
     }
 
@@ -257,6 +267,7 @@ impl IllustIndex {
             self.map.remove(&id);
         }
         assert_eq!(self.map.len(), n - delta);
+        self.stage_dirty = false;
         delta
     }
 
