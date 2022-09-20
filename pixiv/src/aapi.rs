@@ -31,8 +31,8 @@ impl<S: ApiState> Client<S> {
         self.call(endpoint).header("host", "app-api.pixiv.net")
     }
 
-    pub async fn next<T: DeserializeOwned>(&self, next_url: &str) -> Result<T> {
-        fin(self.app(&(Method::GET, Url::parse(next_url)?))).await
+    pub async fn call_url<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        fin(self.app(&(Method::GET, Url::parse(url)?))).await
     }
 
     pub async fn user_bookmarks_illust<T: DeserializeOwned>(

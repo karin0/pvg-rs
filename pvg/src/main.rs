@@ -42,6 +42,11 @@ async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl 
     })
 }
 
+#[get("/action/qupd")]
+async fn quick_update(app: web::Data<Pvg>) -> impl Responder {
+    "ok"
+}
+
 #[get("/test")]
 async fn test(app: web::Data<Pvg>) -> impl Responder {
     let t = Instant::now();
@@ -79,7 +84,7 @@ async fn main() -> Result<()> {
             if tx.send(()).is_err() {
                 error!("failed to invoke shutdown");
             } else {
-                info!("shutting down");
+                warn!("shutting down");
             }
         }
         None => {

@@ -3,9 +3,11 @@ use crate::model::IllustIndex;
 use anyhow::Result;
 use fs2::FileExt;
 use parking_lot::RwLock;
+use pixiv::aapi::BookmarkRestrict;
 use pixiv::client::AuthedClient;
 use pixiv::{IllustId, PageNum};
-use serde_json::{Number, Value};
+use serde::Deserialize;
+use serde_json::{Map, Number, Value};
 use std::io::Read;
 use std::path::PathBuf;
 use tokio::time::Instant;
@@ -16,7 +18,14 @@ pub struct Pvg {
     lock: std::fs::File,
     index: RwLock<IllustIndex>,
     api: RwLock<AuthedClient>,
+    uid: String,
     disk: tokio::sync::Mutex<()>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BookmarkPage {
+    illusts: Vec<Map<String, Value>>,
+    next_url: Option<String>,
 }
 
 impl Pvg {
@@ -54,6 +63,7 @@ impl Pvg {
         );
         let api = AuthedClient::new(&config.refresh_token).await?;
         info!("api: {} {}", api.state.user.name, api.state.user.id);
+        let uid = api.state.user.id.to_string();
 
         Ok(Pvg {
             conf: config,
@@ -61,6 +71,7 @@ impl Pvg {
             index: RwLock::new(nav),
             api: RwLock::new(api),
             disk: tokio::sync::Mutex::new(()),
+            uid,
         })
     }
 
@@ -75,8 +86,45 @@ impl Pvg {
         Ok(())
     }
 
-    pub async fn update(&self) -> Result<()> {
-        todo!()
+    fn _quick_update_with_page(&self, r: Vec<Map<String, Value>>) -> Result<bool> {
+        let mut updated = false;
+        let mut index = self.index.write();
+        for illust in r {
+            if index.stage(illust)? {
+                updated = true;
+            }
+        }
+        Ok(!updated)
+    }
+
+    async fn _quick_update(&self) -> Result<()> {
+        let api = self.api.read();
+        let mut r: BookmarkPage = api
+            .user_bookmarks_illust(&self.uid, BookmarkRestrict::Private)
+            .await?;
+        let mut pn = 1;
+        info!("page {}: {} illusts", pn, r.illusts.len());
+        if self._quick_update_with_page(r.illusts)? {
+            return Ok(());
+        }
+        while let Some(u) = r.next_url {
+            r = api.call_url(&u).await?;
+            pn += 1;
+            info!("page {}: {} illusts", pn, r.illusts.len());
+            if self._quick_update_with_page(r.illusts)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn quick_update(&self) -> Result<()> {
+        if let Err(e) = self._quick_update().await {
+            let n = self.index.write().rollback();
+            error!("quick update failed ({} rolled back): {}", n, e);
+        }
+        info!("quick updated {} illusts", self.index.write().commit());
+        Ok(())
     }
 
     pub fn get_file(&self, iid: IllustId, pn: PageNum) -> Option<PathBuf> {

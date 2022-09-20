@@ -28,6 +28,7 @@ pub struct Illust {
 pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
     pub ids: Vec<IllustId>, // TODO: store pointers to speed up?
+    pub staged: Vec<IllustId>,
 }
 
 impl Page {
@@ -123,7 +124,11 @@ impl IllustIndex {
             (o.data.id, o)
         }));
 
-        Ok(Self { map, ids })
+        Ok(Self {
+            map,
+            ids,
+            staged: vec![],
+        })
     }
 
     pub fn dump(&self) -> serde_json::error::Result<Vec<u8>> {
@@ -140,6 +145,36 @@ impl IllustIndex {
 
     fn iter(&self) -> impl Iterator<Item = &Illust> {
         self.ids.iter().map(move |id| &self.map[id])
+    }
+
+    pub fn stage(&mut self, illust: Map<String, Value>) -> Result<bool> {
+        let illust = Illust::new(illust)?;
+        let id = illust.data.id;
+        if self.map.insert(illust.data.id, illust).is_some() {
+            return Ok(false);
+        }
+        self.staged.push(id);
+        Ok(true)
+    }
+
+    pub fn commit(&mut self) -> usize {
+        // self.staged.reverse();
+        // self.ids.append(&mut self.staged);
+        let delta = self.staged.len();
+        let n = self.ids.len();
+        self.ids.extend(self.staged.drain(..).rev());
+        assert_eq!(self.ids.len(), n + delta);
+        delta
+    }
+
+    pub fn rollback(&mut self) -> usize {
+        let delta = self.staged.len();
+        let n = self.map.len();
+        for id in self.staged.drain(..) {
+            self.map.remove(&id);
+        }
+        assert_eq!(self.map.len(), n - delta);
+        delta
     }
 
     pub fn select(&self, filters: &[String]) -> impl Iterator<Item = &Illust> {
