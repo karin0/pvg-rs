@@ -9,6 +9,7 @@ use anyhow::Result;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt::Debug;
 use std::io;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -42,9 +43,15 @@ async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl 
     })
 }
 
+fn mapper(e: anyhow::Error) -> io::Error {
+    error!("mapper: {:?}", e);
+    io::Error::new(io::ErrorKind::Other, e.to_string())
+}
+
 #[get("/action/qupd")]
-async fn quick_update(app: web::Data<Pvg>) -> impl Responder {
-    "ok"
+async fn quick_update(app: web::Data<Pvg>) -> io::Result<&'static str> {
+    app.quick_update().await.map_err(mapper)?;
+    Ok("ok")
 }
 
 #[get("/test")]
@@ -70,6 +77,7 @@ async fn main() -> Result<()> {
             .app_data(data.clone())
             .service(image)
             .service(select)
+            .service(quick_update)
             .service(test)
     })
     .bind(("127.0.0.1", 5678))?

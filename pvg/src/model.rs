@@ -1,19 +1,30 @@
 use aho_corasick::AhoCorasickBuilder;
 use anyhow::{Context, Result};
-use either::Either;
 use pixiv::model as api;
 use pixiv::IllustId;
 use serde::de::value::MapDeserializer;
 use serde::Deserialize;
 use serde_json::{from_str, Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Dimensions(pub NonZeroU32, pub NonZeroU32);
+
+impl Dimensions {
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        Ok(Self(
+            width.try_into().context("width is zero")?,
+            height.try_into().context("height is zero")?,
+        ))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Page {
     pub url: String,
     pub filename: String,
-    pub width: u32,
-    pub height: u32,
+    pub dimensions: Option<Dimensions>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,14 +43,13 @@ pub struct IllustIndex {
 }
 
 impl Page {
-    pub fn new(url: String, width: u32, height: u32) -> Result<Self> {
+    pub fn new(url: String, dimensions: Option<Dimensions>) -> Result<Self> {
         let p = url.rfind('/').context("bad image url")?;
         let filename = url[p + 1..].to_string();
         Ok(Self {
             url,
             filename,
-            width,
-            height,
+            dimensions,
         })
     }
 }
@@ -69,37 +79,20 @@ impl Illust {
                     .as_ref()
                     .context("Bad image url")?
                     .clone(),
-                data.width,
-                data.height,
+                Some(Dimensions::new(data.width, data.height)?),
             )?]
         } else {
-            data.meta_pages
-                .iter()
-                .zip(
-                    // TODO: this requires old pvg!
-                    raw_data
-                        .get("sizes")
-                        .context("no size!")?
-                        .as_array()
-                        .unwrap()
-                        .iter(),
-                )
-                .filter_map(|(p, v)| -> Option<Result<Page>> {
-                    let v: &Value = v;
-                    let v = v.as_array()?;
-                    if let Some(w) = v[0].as_u64() {
-                        if let Some(h) = v[1].as_u64() {
-                            return Some(Page::new(
-                                p.image_urls.original.clone(),
-                                w as u32,
-                                h as u32,
-                            ));
-                        }
-                    }
-                    warn!("bad page: iid = {}, size = {:?}", data.id, v);
-                    None
-                })
-                .collect::<Result<Vec<_>, _>>()?
+            let mut it = data.meta_pages.iter();
+            let first = it.next().context("no pages")?;
+            let mut vec = Vec::with_capacity(data.page_count as usize);
+            vec.push(Page::new(
+                first.image_urls.original.clone(),
+                Some(Dimensions::new(data.width, data.height)?),
+            )?);
+            for p in it {
+                vec.push(Page::new(p.image_urls.original.clone(), None)?);
+            }
+            vec
         };
         let intro = make_intro(&data);
         Ok(Self {
@@ -110,6 +103,8 @@ impl Illust {
         })
     }
 }
+
+pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
 impl IllustIndex {
     pub fn parse(s: String) -> serde_json::error::Result<Self> {
@@ -139,11 +134,63 @@ impl IllustIndex {
         serde_json::to_vec(&v)
     }
 
+    pub fn load_dims_cache(&mut self, cache: DimCache) -> Result<()> {
+        let mut cnt = 0;
+        for (iid, a) in cache.iter() {
+            if let Some(i) = self.map.get_mut(iid) {
+                cnt += 1;
+                let pc = i.data.page_count as usize;
+                if (pc as usize - 1) * 2 == a.len() {
+                    for p in 1..pc {
+                        let w = a[(p - 1) << 1];
+                        let h = a[(p - 1) << 1 | 1];
+                        i.pages[p].dimensions = Some(Dimensions::new(w, h)?);
+                    }
+                } else {
+                    warn!(
+                        "inconsistent cache size: {} has {}, cache has {}",
+                        iid,
+                        pc,
+                        a.len()
+                    );
+                }
+            } else {
+                warn!("no such illust: {}", iid);
+            }
+        }
+        info!("loaded {} dimensions from cache", cnt);
+        Ok(())
+    }
+
+    pub fn dump_dims_cache(&self) -> Vec<(IllustId, Vec<u32>)> {
+        let mut res = vec![];
+        for i in self.iter() {
+            if i.data.page_count > 1 {
+                let mut a = Vec::with_capacity((i.data.page_count as usize - 1) * 2);
+                let mut any = false;
+                for p in i.pages.iter().skip(1) {
+                    if let Some(d) = p.dimensions {
+                        a.push(d.0.get());
+                        a.push(d.1.get());
+                        any = true;
+                    } else {
+                        a.push(0);
+                        a.push(0);
+                    }
+                }
+                if any {
+                    res.push((i.data.id, a));
+                }
+            }
+        }
+        res
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Illust> {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &Illust> {
         self.ids.iter().map(move |id| &self.map[id])
     }
 
@@ -177,16 +224,16 @@ impl IllustIndex {
         delta
     }
 
-    pub fn select(&self, filters: &[String]) -> impl Iterator<Item = &Illust> {
+    pub fn select(&self, filters: &[String]) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
         if filters.is_empty() {
-            return Either::Left(self.iter());
+            return Box::new(self.iter());
         }
         let ac = AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .build(filters);
         let mut s = HashSet::new();
         let n = filters.len();
-        Either::Right(self.iter().filter(move |illust| {
+        Box::new(self.iter().filter(move |illust| {
             s.clear();
             for mat in ac.find_overlapping_iter(&illust.intro) {
                 s.insert(mat.pattern());

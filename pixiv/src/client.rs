@@ -4,19 +4,21 @@ use crate::model::{from_response, Response, User};
 use crate::oauth::{auth, AuthSuccess};
 use log::info;
 use reqwest::{Client as Http, RequestBuilder};
+use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::fmt::Debug;
-use tokio::time::{Duration, Instant};
+use std::time::SystemTime;
+use tokio::time::Duration;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthedState {
     pub access_header: String,
     pub refresh_token: String,
-    pub expires_at: Instant,
+    pub expires_at: SystemTime,
     pub user: User,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct GuestState {}
 
 pub trait ApiState {
@@ -35,10 +37,10 @@ impl ApiState for GuestState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AuthResult {
     resp: Response,
-    time: Instant,
+    time: SystemTime,
 }
 
 impl AuthedState {
@@ -54,11 +56,11 @@ impl AuthedState {
     }
 
     pub fn expired(&self) -> bool {
-        Instant::now() > self.expires_at
+        SystemTime::now() > self.expires_at
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Client<S: ApiState> {
     http: Http,
     pub(crate) api: ApiEndpoint,
@@ -95,7 +97,7 @@ impl<S: ApiState> Client<S> {
     }
 
     pub async fn raw_auth(&self, refresh_token: &str) -> Result<AuthResult> {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let resp = self.do_auth(refresh_token).await?;
         info!("auth: {:?}", resp);
         Ok(AuthResult { resp, time: now })
@@ -107,9 +109,15 @@ impl<S: ApiState> Client<S> {
     }
 }
 
+impl Default for GuestClient {
+    fn default() -> Self {
+        Self::make(GuestState::default())
+    }
+}
+
 impl GuestClient {
     pub fn new() -> Self {
-        Self::make(GuestState {})
+        Self::default()
     }
 
     pub fn into_authed(self, token: AuthedState) -> AuthedClient {
@@ -128,8 +136,13 @@ impl AuthedClient {
         Ok(r.into_authed(s))
     }
 
+    pub fn load(state: AuthedState) -> Self {
+        Self::make(state)
+    }
+
     pub async fn ensure_authed(&mut self) -> Result<()> {
         if self.state.expired() {
+            info!("refreshing token");
             self.state = self.auth(&self.state.refresh_token).await?;
         }
         Ok(())

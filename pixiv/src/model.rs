@@ -1,5 +1,5 @@
 use serde::de::value::MapDeserializer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 use serde_json::{Map, Value};
 
@@ -32,7 +32,7 @@ pub struct Tag {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct User {
     // id is typed number in user_bookmarks_illust, but string in auth.
     #[serde(deserialize_with = "deserialize_number_from_string")]
