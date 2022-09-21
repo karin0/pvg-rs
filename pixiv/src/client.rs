@@ -6,15 +6,19 @@ use log::info;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client as Http, RequestBuilder};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
+use serde_with::TimestampMilliSeconds;
 use std::cmp::max;
 use std::fmt::Debug;
 use std::time::SystemTime;
 use tokio::time::Duration;
 
+#[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthedState {
     pub access_header: String,
     pub refresh_token: String,
+    #[serde_as(as = "TimestampMilliSeconds<i64>")]
     pub expires_at: SystemTime,
     pub user: User,
 }

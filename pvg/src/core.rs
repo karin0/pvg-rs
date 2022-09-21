@@ -15,7 +15,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -29,14 +28,14 @@ struct LoadedCache {
     token: Option<AuthedState>,
     dims: Option<Vec<(IllustId, Vec<u32>)>>,
     #[serde(default)]
-    not_found: HashSet<OsString>,
+    not_found: HashSet<PathBuf>,
 }
 
 #[derive(Serialize)]
 struct SavingCache<'a> {
     token: &'a AuthedState,
     dims: Vec<(IllustId, Vec<u32>)>,
-    not_found: &'a HashSet<OsString>,
+    not_found: &'a HashSet<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -50,7 +49,7 @@ pub struct Pvg {
     uid: String,
     disk: tokio::sync::Mutex<()>,
     download_all_lock: tokio::sync::Mutex<()>,
-    not_found: Mutex<HashSet<OsString>>,
+    not_found: Mutex<HashSet<PathBuf>>,
     db_init_size: usize,
 }
 
@@ -412,7 +411,8 @@ impl Pvg {
             .map(|page| (&page.source, self.conf.pix_dir.join(page.source.filename())))
             .filter(|(_, path)| {
                 if !path.exists() {
-                    if !not_found.contains(path.file_name().unwrap()) {
+                    let filename: &Path = path.file_name().unwrap().as_ref();
+                    if !not_found.contains(filename) {
                         return true;
                     } else {
                         warn!("{:?}: skipping due to 404", path);
@@ -450,7 +450,7 @@ impl Pvg {
                     // handle 404 (and 500 for 85136899?)
                     if let Ok(pixiv::Error::Pixiv(404, _)) = e.downcast::<pixiv::Error>() {
                         warn!("{:?}: 404!", path);
-                        the_404.push(path.file_name().unwrap().to_owned());
+                        the_404.push(path.file_name().unwrap().into());
                     }
                 }
             }
