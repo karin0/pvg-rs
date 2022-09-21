@@ -140,7 +140,6 @@ impl Pvg {
             std::env::set_var("HTTPS_PROXY", proxy);
             std::env::set_var("ALL_PROXY", proxy);
         }
-        // XXX: using sync files since fs2 doesn't support async
         let (mut nav, lock) = match std::fs::File::open(&config.db_file) {
             Ok(mut db) => {
                 db.try_lock_exclusive()?;
@@ -329,6 +328,10 @@ impl Pvg {
         let index = self.index.read();
         let pn: usize = pn.try_into().ok()?;
         let src = &index.map.get(&iid)?.pages.get(pn)?.source;
+        let file: &Path = src.filename().as_ref();
+        if self.not_found.lock().contains(file) {
+            return None;
+        }
         let url = src.url.clone();
         let path = self.conf.pix_dir.join(src.filename());
         Some((url, path))
@@ -337,7 +340,6 @@ impl Pvg {
     async fn open_temp(&self, path: &Path) -> Result<DownloadingFile> {
         let tmp_path = self.conf.tmp_dir.join(path.file_name().unwrap());
         // TODO: this fails if a file is requested twice before it's downloaded, do some waiting.
-        // FIXME: this always fails if an old temp file is left behind.
         DownloadingFile::new(tmp_path).await
     }
 
@@ -353,10 +355,15 @@ impl Pvg {
         let remote = match self.pixiv.download(src).await {
             Err(e) => {
                 tmp.rollback().await;
-                error!("{:?}: connection failed: {:?}", path, e);
+                if let pixiv::Error::Pixiv(404, _) = e {
+                    warn!("{:?}: 404, memorized", path);
+                    self.not_found.lock().insert(path);
+                } else {
+                    error!("{:?}: request failed: {:?}", path, e);
+                }
                 return Err(e.into());
             }
-            Ok(r) => r.bytes_stream(),
+            Ok(r) => r,
         };
         info!(
             "{:?}: connection established in {:.3} secs",
@@ -392,29 +399,24 @@ impl Pvg {
             }
         });
 
-        let last = Instant::now();
         Ok(stream::unfold(
-            (remote, tx, path, last),
-            |(mut remote, tx, path, last)| async move {
-                let dt = last.elapsed().as_millis();
-                if dt > 5 {
-                    warn!("{:?}: stream polled after {} ms!", path, dt);
-                }
-                match remote.next().await {
-                    Some(Ok(b)) => {
+            (remote, tx, path),
+            |(mut remote, tx, path)| async move {
+                match remote.chunk().await {
+                    Ok(Some(b)) => {
                         if let Err(e) = tx.send(Some(b.clone())) {
                             error!("{:?}: send error: {}", path, e);
                         }
-                        Some((Ok(b), (remote, tx, path, Instant::now())))
+                        Some((Ok(b), (remote, tx, path)))
                     }
-                    Some(Err(e)) => {
+                    Err(e) => {
                         error!("{:?}: remote streaming failed: {}", path, e);
                         if let Err(e) = tx.send(None) {
                             error!("{:?}: none send error: {}", path, e);
                         }
-                        Some((Err(e), (remote, tx, path, Instant::now())))
+                        Some((Err(e), (remote, tx, path)))
                     }
-                    None => {
+                    Ok(None) => {
                         info!("{:?}: remote streaming done", path);
                         drop(tx);
                         None
