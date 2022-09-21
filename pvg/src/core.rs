@@ -102,9 +102,9 @@ impl DownloadingFile {
                 let t = t.elapsed().as_secs_f32();
                 let kib = self.size as f32 / 1024.;
                 info!(
-                    "{:?}: committed {} KiB in {:.3} secs ({:.3} KiB/s)",
+                    "{:?}: committed {:.3} KiB in {:.3} secs ({:.3} KiB/s)",
                     self.path,
-                    kib
+                    kib,
                     t,
                     kib / t
                 );
@@ -392,22 +392,27 @@ impl Pvg {
             }
         });
 
+        let last = Instant::now();
         Ok(stream::unfold(
-            (remote, tx, path),
-            |(mut remote, tx, path)| async move {
+            (remote, tx, path, last),
+            |(mut remote, tx, path, last)| async move {
+                let dt = last.elapsed().as_millis();
+                if dt > 5 {
+                    warn!("{:?}: stream polled after {} ms!", path, dt);
+                }
                 match remote.next().await {
                     Some(Ok(b)) => {
                         if let Err(e) = tx.send(Some(b.clone())) {
                             error!("{:?}: send error: {}", path, e);
                         }
-                        Some((Ok(b), (remote, tx, path)))
+                        Some((Ok(b), (remote, tx, path, Instant::now())))
                     }
                     Some(Err(e)) => {
                         error!("{:?}: remote streaming failed: {}", path, e);
                         if let Err(e) = tx.send(None) {
                             error!("{:?}: none send error: {}", path, e);
                         }
-                        Some((Err(e), (remote, tx, path)))
+                        Some((Err(e), (remote, tx, path, Instant::now())))
                     }
                     None => {
                         info!("{:?}: remote streaming done", path);
@@ -632,7 +637,9 @@ struct SelectResponse<'a> {
 impl Pvg {
     pub fn select(&self, filters: &[String]) -> serde_json::Result<String> {
         // TODO: do this all sync can block for long.
+        let now = Instant::now();
         let index = self.index.read();
+        info!("{:?}: locked in {} ms", filters, now.elapsed().as_millis());
         let now = Instant::now();
         let r: Vec<SelectedIllust> = index
             .select(filters)
