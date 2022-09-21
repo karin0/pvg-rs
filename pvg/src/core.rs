@@ -20,7 +20,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 
 #[derive(Deserialize, Default)]
@@ -96,6 +96,8 @@ impl DownloadingFile {
         }
     }
 }
+
+static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(8);
 
 impl Pvg {
     pub async fn new() -> Result<Self> {
@@ -314,25 +316,30 @@ impl Pvg {
         path: PathBuf,
     ) -> Result<impl Stream<Item = pixiv::reqwest::Result<Bytes>>> {
         info!("downloading {}", src);
+        let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
         let mut tmp = self.open_temp(&path).await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Bytes>>();
 
         let npath = path.clone();
         tokio::spawn(async move {
             let path = npath;
+            let perm = perm;
             while let Some(msg) = rx.recv().await {
                 if let Some(b) = msg {
                     if let Err(e) = tmp.write(&b).await {
                         error!("{:?}: failed to write temp: {}", path, e);
+                        drop(perm);
                         tmp.rollback().await;
                         return;
                     }
                 } else {
                     error!("{:?}: remote error", path);
+                    drop(perm);
                     tmp.rollback().await;
                     return;
                 }
             }
+            drop(perm);
             info!("{:?}: committing", path);
             if let Err(e) = tmp.commit(&path).await {
                 error!("{:?}: failed to save: {}", path, e);
@@ -377,13 +384,8 @@ impl Pvg {
         Ok(())
     }
 
-    async fn _downloader_inner(
-        &self,
-        url: &str,
-        path: &Path,
-        sema: &tokio::sync::Semaphore,
-    ) -> Result<()> {
-        let perm = sema.acquire().await?;
+    async fn _downloader_inner(&self, url: &str, path: &Path) -> Result<()> {
+        let perm = DOWNLOAD_SEMA.acquire().await?;
         let r = self.pixiv.download(url).await?;
 
         let mut tmp = self.open_temp(path).await?;
@@ -397,13 +399,8 @@ impl Pvg {
         Ok(())
     }
 
-    async fn _downloader(
-        &self,
-        url: String,
-        path: PathBuf,
-        sema: &tokio::sync::Semaphore,
-    ) -> (PathBuf, Result<()>) {
-        let r = self._downloader_inner(&url, &path, sema).await;
+    async fn _downloader(&self, url: String, path: PathBuf) -> (PathBuf, Result<()>) {
+        let r = self._downloader_inner(&url, &path).await;
         (path, r)
     }
 
@@ -436,10 +433,9 @@ impl Pvg {
         let q = self._make_download_queue();
         warn!("download_all: blocked for {} ms", t.elapsed().as_millis());
         info!("{} pages to download", q.len());
-        let sema = tokio::sync::Semaphore::new(5);
         let mut futs = q
             .into_iter()
-            .map(|(url, path)| self._downloader(url, path, &sema))
+            .map(|(url, path)| self._downloader(url, path))
             .collect::<FuturesUnordered<_>>();
         let n = futs.len();
         let mut cnt = 0;
