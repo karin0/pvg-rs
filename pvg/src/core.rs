@@ -13,7 +13,7 @@ use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::io;
 use std::io::Read;
@@ -63,6 +63,8 @@ pub struct BookmarkPage {
 struct DownloadingFile {
     path: PathBuf,
     file: fs::File,
+    time: Option<Instant>,
+    size: usize,
 }
 
 impl DownloadingFile {
@@ -72,11 +74,22 @@ impl DownloadingFile {
             .create_new(true)
             .open(&path)
             .await?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            time: None,
+            size: 0,
+        })
+    }
+
+    pub fn start(&mut self) {
+        self.time = Some(Instant::now());
     }
 
     pub async fn write(&mut self, b: &Bytes) -> io::Result<()> {
-        self.file.write_all(b).await
+        self.file.write_all(b).await?;
+        self.size += b.len();
+        Ok(())
     }
 
     pub async fn commit(self, path: &Path) -> io::Result<()> {
@@ -85,6 +98,19 @@ impl DownloadingFile {
             error!("{:?}: COMMIT FAILED: {}", self.path, e);
             Err(e)
         } else {
+            if let Some(t) = self.time {
+                let t = t.elapsed().as_secs_f32();
+                let kib = self.size as f32 / 1024.;
+                info!(
+                    "{:?}: committed {} KiB in {:.3} secs ({:.3} KiB/s)",
+                    self.path,
+                    kib
+                    t,
+                    kib / t
+                );
+            } else {
+                info!("{:?}: committed {} B", self.path, self.size);
+            }
             Ok(())
         }
     }
@@ -92,12 +118,17 @@ impl DownloadingFile {
     pub async fn rollback(self) {
         drop(self.file);
         if let Err(e) = fs::remove_file(&self.path).await {
-            error!("{:?}: ROLLBACK FAILED: {}", self.path, e);
+            error!(
+                "{:?}: ROLLBACK FAILED ({} bytes): {}",
+                self.path, self.size, e
+            );
+        } else {
+            info!("{:?}: rolled back {} bytes", self.path, self.size);
         }
     }
 }
 
-static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(8);
+static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
 
 impl Pvg {
     pub async fn new() -> Result<Self> {
@@ -163,7 +194,7 @@ impl Pvg {
                 }
             }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
+                if e.kind() == io::ErrorKind::NotFound {
                     info!("no cache file");
                     not_found = HashSet::new();
                     AuthedClient::new(&config.refresh_token).await?
@@ -316,8 +347,24 @@ impl Pvg {
         path: PathBuf,
     ) -> Result<impl Stream<Item = pixiv::reqwest::Result<Bytes>>> {
         info!("downloading {}", src);
-        let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
         let mut tmp = self.open_temp(&path).await?;
+        let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
+        let t = Instant::now();
+        let remote = match self.pixiv.download(src).await {
+            Err(e) => {
+                tmp.rollback().await;
+                error!("{:?}: connection failed: {:?}", path, e);
+                return Err(e.into());
+            }
+            Ok(r) => r.bytes_stream(),
+        };
+        info!(
+            "{:?}: connection established in {:.3} secs",
+            path,
+            t.elapsed().as_secs_f32()
+        );
+        tmp.start();
+
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Bytes>>();
 
         let npath = path.clone();
@@ -340,13 +387,11 @@ impl Pvg {
                 }
             }
             drop(perm);
-            info!("{:?}: committing", path);
             if let Err(e) = tmp.commit(&path).await {
                 error!("{:?}: failed to save: {}", path, e);
             }
         });
 
-        let remote = self.pixiv.download(src).await?.bytes_stream();
         Ok(stream::unfold(
             (remote, tx, path),
             |(mut remote, tx, path)| async move {
@@ -386,9 +431,17 @@ impl Pvg {
 
     async fn _downloader_inner(&self, url: &str, path: &Path) -> Result<()> {
         let perm = DOWNLOAD_SEMA.acquire().await?;
-        let r = self.pixiv.download(url).await?;
-
         let mut tmp = self.open_temp(path).await?;
+        let r = match self.pixiv.download(url).await {
+            Err(e) => {
+                tmp.rollback().await;
+                info!("{:?}: connection failed: {:?}", path, e);
+                return Err(e.into());
+            }
+            Ok(r) => r,
+        };
+
+        tmp.start();
         let res = Self::_download_file(r, &mut tmp).await;
         drop(perm);
         if let Err(e) = res {
@@ -556,48 +609,62 @@ impl Pvg {
         }
         Ok(())
     }
+}
 
-    pub fn select(&self, filters: &[String]) -> Vec<Vec<Value>> {
+#[derive(Debug, Serialize)]
+struct SelectedPage<'a>(u32, u32, &'a str, &'a str);
+
+#[derive(Debug, Serialize)]
+struct SelectedIllust<'a>(
+    IllustId,
+    &'a str,
+    u32,
+    &'a str,
+    Vec<&'a str>,
+    Vec<SelectedPage<'a>>,
+);
+
+#[derive(Debug, Serialize)]
+struct SelectResponse<'a> {
+    items: Vec<SelectedIllust<'a>>,
+}
+
+impl Pvg {
+    pub fn select(&self, filters: &[String]) -> serde_json::Result<String> {
         // TODO: do this all sync can block for long.
         let index = self.index.read();
         let now = Instant::now();
-        let r: Vec<Vec<Value>> = index
+        let r: Vec<SelectedIllust> = index
             .select(filters)
             .rev()
-            .flat_map(|illust| {
-                illust.pages.iter().enumerate().flat_map(|(i, page)| {
-                    let dims;
-                    if let Some(d) = page.dimensions {
-                        dims = d;
-                    } else {
-                        warn!("skipping unmeasured page {}", page.source.filename());
-                        return None;
-                    }
-                    Some(vec![
-                        Value::Number(Number::from(illust.data.id)),
-                        Value::Number(Number::from(i)),
-                        Value::String("img".to_string()),
-                        Value::Number(Number::from(dims.0.get())),
-                        Value::Number(Number::from(dims.1.get())),
-                        Value::String(illust.data.title.clone()),
-                        Value::String(illust.data.user.name.clone()),
-                        Value::Number(Number::from(illust.data.user.id)),
-                        Value::Array(
-                            illust
-                                .data
-                                .tags
-                                .iter()
-                                .map(|t| Value::String(t.name.clone()))
-                                .collect(),
-                        ),
-                        Value::String(page.source.filename().to_string()),
-                    ])
-                })
+            .map(|illust| {
+                let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
+                let pages: Vec<SelectedPage> = illust
+                    .pages
+                    .iter()
+                    .map(|page| {
+                        let (w, h) = if let Some(d) = page.dimensions {
+                            (d.0.get(), d.1.get())
+                        } else {
+                            warn!("allowing unmeasured page {}", page.source.filename());
+                            (0, 0)
+                        };
+                        SelectedPage(w, h, "img", page.source.filename())
+                    })
+                    .collect();
+                let i = &illust.data;
+                SelectedIllust(
+                    i.id,
+                    i.title.as_ref(),
+                    i.user.id,
+                    i.user.name.as_ref(),
+                    tags,
+                    pages,
+                )
             })
             .collect();
         let t = now.elapsed();
-        drop(index);
         info!("{:?} -> {} results, {} ms", filters, r.len(), t.as_millis());
-        r
+        serde_json::to_string(&SelectResponse { items: r })
     }
 }

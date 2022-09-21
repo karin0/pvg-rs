@@ -40,6 +40,17 @@ fn ensure_dir(dir: &Path) {
     };
 }
 
+fn ensure_empty_dir(dir: PathBuf) -> PathBuf {
+    if let Ok(meta) = fs::metadata(&dir) {
+        if !meta.is_dir() {
+            panic!("{} is not a directory", dir.display());
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    };
+    fs::create_dir(&dir).unwrap();
+    dir
+}
+
 pub fn read_config() -> Result<Config> {
     let config = fs::read_to_string("config.json")?;
     let config: ConfigFile = from_str(&config)?;
@@ -65,7 +76,7 @@ pub fn read_config() -> Result<Config> {
         refresh_token: config.refresh_token,
         proxy: config.proxy,
         pix_dir: at_dir("pix"),
-        tmp_dir: at_dir("tmp"),
+        tmp_dir: ensure_empty_dir(at("tmp")),
         db_file: at("fav.json"),
         cache_file: at("cache.json"),
         static_dir,

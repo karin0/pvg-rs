@@ -5,7 +5,7 @@ mod model;
 use crate::core::Pvg;
 use actix_cors::Cors;
 use actix_files::NamedFile;
-use actix_web::http::StatusCode;
+use actix_web::http::{header::ContentType, StatusCode};
 use actix_web::{
     get, post, web, App, Either, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer,
     Responder,
@@ -61,9 +61,10 @@ struct SelectPayload {
 
 #[post("/select")]
 async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl Responder {
-    web::Json(SelectResponse {
-        items: app.select(&filters.filters),
-    })
+    let r: io::Result<_> = Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(app.select(&filters.filters).map_err(mapper)?));
+    r
 }
 
 fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
