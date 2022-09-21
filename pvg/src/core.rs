@@ -102,6 +102,11 @@ impl Pvg {
         let t = Instant::now();
         let config = read_config()?;
         info!("config: {:?}", config);
+        if let Some(proxy) = &config.proxy {
+            std::env::set_var("HTTP_PROXY", proxy);
+            std::env::set_var("HTTPS_PROXY", proxy);
+            std::env::set_var("ALL_PROXY", proxy);
+        }
         // XXX: using sync files since fs2 doesn't support async
         let (mut nav, lock) = match std::fs::File::open(&config.db_file) {
             Ok(mut db) => {
@@ -113,7 +118,7 @@ impl Pvg {
                 (nav, db)
             }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
+                if e.kind() == io::ErrorKind::NotFound {
                     info!("creating new db file");
                     let lock = std::fs::OpenOptions::new()
                         .create_new(true)
