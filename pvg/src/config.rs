@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::from_str;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Debug)]
@@ -11,6 +12,8 @@ struct ConfigFile {
     home: Option<PathBuf>,
     proxy: Option<String>,
     static_dir: Option<PathBuf>,
+    host: Option<IpAddr>,
+    port: Option<u16>,
     // pix_dir: String,
     // tmp_dir: String,
 }
@@ -25,6 +28,7 @@ pub struct Config {
     pub db_file: PathBuf,
     pub cache_file: PathBuf,
     pub static_dir: PathBuf,
+    pub addr: SocketAddr,
 }
 
 fn ensure_dir(dir: &Path) {
@@ -71,6 +75,10 @@ pub fn read_config() -> Result<Config> {
 
     let static_dir = config.static_dir.unwrap_or_else(|| at("static"));
 
+    let host = config.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let port = config.port.unwrap_or(5678);
+    let addr = SocketAddr::new(host, port);
+
     Ok(Config {
         username: config.username,
         refresh_token: config.refresh_token,
@@ -80,5 +88,6 @@ pub fn read_config() -> Result<Config> {
         db_file: at("fav.json"),
         cache_file: at("cache.json"),
         static_dir,
+        addr,
     })
 }

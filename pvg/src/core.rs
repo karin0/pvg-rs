@@ -653,7 +653,6 @@ impl Pvg {
             .select(filters)
             .rev()
             .map(|illust| {
-                let mut unmeasured = 0;
                 let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
                 let pages: Vec<SelectedPage> = illust
                     .pages
@@ -662,19 +661,18 @@ impl Pvg {
                         let (w, h) = if let Some(d) = page.dimensions {
                             (d.0.get(), d.1.get())
                         } else {
-                            unmeasured += 1;
                             (0, 0)
                         };
                         SelectedPage(w, h, "img", page.source.filename())
                     })
                     .collect();
                 let i = &illust.data;
-                if unmeasured > 0 {
+                /* if unmeasured > 0 {
                     warn!(
                         "{}: {} unmeasured pages (of {})",
                         i.id, unmeasured, i.page_count
                     );
-                }
+                } */
                 SelectedIllust(
                     i.id,
                     i.title.as_ref(),

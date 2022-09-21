@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
     let core = Pvg::new().await?;
     let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
     let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
+    let addr = core.conf.addr;
     let data = web::Data::new(core);
     let pvg = data.clone();
     let server = HttpServer::new(move || {
@@ -131,9 +132,10 @@ async fn main() -> Result<()> {
             .service(test)
             .service(index)
     })
-    .bind(("127.0.0.1", 5678))?
+    .bind(addr)?
     .disable_signals()
     .run();
+    info!("listening on {}", addr);
     let handle = server.handle();
 
     let (tx, mut rx) = oneshot::channel();
