@@ -361,7 +361,9 @@ impl Pvg {
                 tmp.rollback().await;
                 if let pixiv::Error::Pixiv(404, _) = e {
                     warn!("{:?}: 404, memorized", path);
-                    self.not_found.lock().insert(path);
+                    self.not_found
+                        .lock()
+                        .insert(path.file_name().unwrap().into());
                 } else {
                     error!("{:?}: request failed: {:?}", path, e);
                 }
