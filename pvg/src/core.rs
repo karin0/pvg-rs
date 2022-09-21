@@ -41,7 +41,7 @@ struct SavingCache<'a> {
 
 #[derive(Debug)]
 pub struct Pvg {
-    conf: Config,
+    pub conf: Config,
     #[allow(dead_code)]
     lock: std::fs::File,
     index: RwLock<IllustIndex>,

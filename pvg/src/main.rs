@@ -7,7 +7,8 @@ use actix_cors::Cors;
 use actix_files::NamedFile;
 use actix_web::http::StatusCode;
 use actix_web::{
-    get, post, web, App, Either, HttpResponse, HttpResponseBuilder, HttpServer, Responder,
+    get, post, web, App, Either, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer,
+    Responder,
 };
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;
 use std::io;
+use std::path::Path;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -96,6 +98,12 @@ async fn test(app: web::Data<Pvg>) -> impl Responder {
     "ok"
 }
 
+#[get("/")]
+async fn index(req: HttpRequest) -> impl Responder {
+    let index: &'static Path = *req.app_data().unwrap();
+    NamedFile::open_async(index).await
+}
+
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
@@ -103,18 +111,25 @@ async fn main() -> Result<()> {
     }
     pretty_env_logger::init_timed();
 
-    let data = web::Data::new(Pvg::new().await?);
+    let core = Pvg::new().await?;
+    let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
+    let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
+    let data = web::Data::new(core);
     let pvg = data.clone();
     let server = HttpServer::new(move || {
+        let statics = actix_files::Files::new("/s", static_dir);
         App::new()
             .wrap(Cors::permissive())
             .app_data(data.clone())
+            .app_data(static_index)
+            .service(statics)
             .service(image)
             .service(select)
             .service(quick_update)
             .service(download_all)
             .service(measure_all)
             .service(test)
+            .service(index)
     })
     .bind(("127.0.0.1", 5678))?
     .disable_signals()

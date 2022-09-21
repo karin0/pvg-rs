@@ -10,6 +10,7 @@ struct ConfigFile {
     refresh_token: String,
     home: Option<PathBuf>,
     proxy: Option<String>,
+    static_dir: Option<PathBuf>,
     // pix_dir: String,
     // tmp_dir: String,
 }
@@ -23,6 +24,7 @@ pub struct Config {
     pub tmp_dir: PathBuf,
     pub db_file: PathBuf,
     pub cache_file: PathBuf,
+    pub static_dir: PathBuf,
 }
 
 fn ensure_dir(dir: &Path) {
@@ -56,6 +58,8 @@ pub fn read_config() -> Result<Config> {
         r
     };
 
+    let static_dir = config.static_dir.unwrap_or_else(|| at("static"));
+
     Ok(Config {
         username: config.username,
         refresh_token: config.refresh_token,
@@ -64,5 +68,6 @@ pub fn read_config() -> Result<Config> {
         tmp_dir: at_dir("tmp"),
         db_file: at("fav.json"),
         cache_file: at("cache.json"),
+        static_dir,
     })
 }
