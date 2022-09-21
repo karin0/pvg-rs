@@ -1,5 +1,6 @@
 use crate::config::{read_config, Config};
 use crate::model::{DimCache, Dimensions, IllustIndex};
+use crate::{bug, critical};
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
@@ -95,7 +96,7 @@ impl DownloadingFile {
     pub async fn commit(self, path: &Path) -> io::Result<()> {
         drop(self.file);
         if let Err(e) = fs::rename(&self.path, path).await {
-            error!("{:?}: COMMIT FAILED: {}", self.path, e);
+            critical!("{:?}: COMMIT FAILED: {}", self.path, e);
             Err(e)
         } else {
             if let Some(t) = self.time {
@@ -118,9 +119,11 @@ impl DownloadingFile {
     pub async fn rollback(self) {
         drop(self.file);
         if let Err(e) = fs::remove_file(&self.path).await {
-            error!(
+            critical!(
                 "{:?}: ROLLBACK FAILED ({} bytes): {}",
-                self.path, self.size, e
+                self.path,
+                self.size,
+                e
             );
         } else {
             info!("{:?}: rolled back {} bytes", self.path, self.size);
@@ -229,9 +232,10 @@ impl Pvg {
         } else {
             let n = index.len();
             if n != self.db_init_size {
-                error!(
+                bug!(
                     "DB SIZE CHANGED WITHOUT DIRTY FLAG! {} -> {}",
-                    self.db_init_size, n
+                    self.db_init_size,
+                    n
                 );
                 db = Some(index.dump()?);
             } else {
@@ -405,14 +409,14 @@ impl Pvg {
                 match remote.chunk().await {
                     Ok(Some(b)) => {
                         if let Err(e) = tx.send(Some(b.clone())) {
-                            error!("{:?}: send error: {}", path, e);
+                            bug!("{:?}: send error: {}", path, e);
                         }
                         Some((Ok(b), (remote, tx, path)))
                     }
                     Err(e) => {
                         error!("{:?}: remote streaming failed: {}", path, e);
                         if let Err(e) = tx.send(None) {
-                            error!("{:?}: none send error: {}", path, e);
+                            bug!("{:?}: none send error: {}", path, e);
                         }
                         Some((Err(e), (remote, tx, path)))
                     }
@@ -526,8 +530,18 @@ impl Pvg {
         }
         Ok(())
     }
+}
 
-    fn _make_measure_queue(&self) -> (Vec<(IllustId, Vec<(PageNum, String)>)>, usize) {
+type MeasureQueue = (Vec<(IllustId, Vec<(PageNum, String)>)>, usize);
+
+fn measure_file(path: &Path) -> Result<Dimensions> {
+    let img = image::open(path)?;
+    let (w, h) = img.dimensions();
+    Ok(Dimensions(w.try_into()?, h.try_into()?))
+}
+
+impl Pvg {
+    fn _make_measure_queue(&self) -> MeasureQueue {
         let mut vec = vec![];
         let mut n = 0;
         let r: Vec<(_, Vec<(PageNum, String)>)> = self
@@ -566,12 +580,6 @@ impl Pvg {
         Ok(())
     }
 
-    fn _measure(path: &Path) -> Result<Dimensions> {
-        let img = image::open(path)?;
-        let (w, h) = img.dimensions();
-        Ok(Dimensions(w.try_into()?, h.try_into()?))
-    }
-
     pub async fn measure_all(&self) -> Result<()> {
         // let _ = self.measure_all_lock.try_lock()?;
         let t = Instant::now();
@@ -586,9 +594,9 @@ impl Pvg {
                 .flat_map(|(iid, vec)| vec.into_par_iter().map(move |(pn, v)| (iid, pn, v)))
                 .for_each(move |(iid, pn, filename)| {
                     let file = base.join(filename);
-                    let r = Self::_measure(&file);
+                    let r = measure_file(&file);
                     if let Err(e) = tx.send((iid, pn, r)) {
-                        error!("{:?}: send error: {}", file, e);
+                        bug!("{:?}: send error: {}", file, e);
                     }
                 });
         });
@@ -641,12 +649,11 @@ impl Pvg {
         // TODO: do this all sync can block for long.
         let now = Instant::now();
         let index = self.index.read();
-        info!("{:?}: locked in {} ms", filters, now.elapsed().as_millis());
-        let now = Instant::now();
         let r: Vec<SelectedIllust> = index
             .select(filters)
             .rev()
             .map(|illust| {
+                let mut unmeasured = 0;
                 let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
                 let pages: Vec<SelectedPage> = illust
                     .pages
@@ -655,13 +662,19 @@ impl Pvg {
                         let (w, h) = if let Some(d) = page.dimensions {
                             (d.0.get(), d.1.get())
                         } else {
-                            warn!("allowing unmeasured page {}", page.source.filename());
+                            unmeasured += 1;
                             (0, 0)
                         };
                         SelectedPage(w, h, "img", page.source.filename())
                     })
                     .collect();
                 let i = &illust.data;
+                if unmeasured > 0 {
+                    warn!(
+                        "{}: {} unmeasured pages (of {})",
+                        i.id, unmeasured, i.page_count
+                    );
+                }
                 SelectedIllust(
                     i.id,
                     i.title.as_ref(),

@@ -1,6 +1,7 @@
 mod config;
 mod core;
 mod model;
+mod util;
 
 use crate::core::Pvg;
 use actix_cors::Cors;
