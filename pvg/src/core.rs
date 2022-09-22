@@ -683,8 +683,6 @@ struct SelectedIllust<'a>(
     Vec<&'a str>,
     Vec<SelectedPage<'a>>,
     &'a str,
-    &'a str,
-    u16,
     u16,
 );
 
@@ -729,15 +727,23 @@ impl Pvg<'_> {
                     &i.user.name,
                     tags,
                     pages,
-                    &i.caption,
                     &i.create_date,
-                    i.sanity_level,
-                    i.x_restrict,
+                    i.sanity_level + 2 * i.x_restrict,
                 )
             })
             .collect();
-        let t = now.elapsed();
-        info!("{:?} -> {} results, {} ms", filters, r.len(), t.as_millis());
-        serde_json::to_string(&SelectResponse { items: r })
+        let now2 = Instant::now();
+        let t = (now2 - now).as_millis();
+        let n = r.len();
+        let r = serde_json::to_string(&SelectResponse { items: r })?;
+        info!(
+            "{:?}: {} illusts ({:.1} KiB) in {} + {} ms",
+            filters,
+            n,
+            r.len() as f32 / 1024.,
+            t,
+            now2.elapsed().as_millis()
+        );
+        Ok(r)
     }
 }

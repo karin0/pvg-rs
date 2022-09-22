@@ -1416,7 +1416,6 @@ dependencies = [
  "actix-cors",
  "actix-files",
  "actix-web",
- "aho-corasick",
  "anyhow",
  "ctrlc",
  "fs2",
