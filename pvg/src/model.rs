@@ -1,12 +1,14 @@
-use aho_corasick::AhoCorasickBuilder;
 use anyhow::{bail, Context, Result};
+use itertools::Itertools;
 use pixiv::model as api;
 use pixiv::IllustId;
 use serde::de::value::MapDeserializer;
 use serde::Deserialize;
 use serde_json::{from_str, Map, Value};
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
+use suffix::SuffixTable;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Dimensions(pub NonZeroU32, pub NonZeroU32);
@@ -64,12 +66,20 @@ struct IllustStage {
     dirty: bool,
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct IllustIndex {
+#[derive(Debug, Clone)]
+pub struct IllustIndex<'a> {
     pub map: HashMap<IllustId, Illust>,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     pub dirty: bool,
     stages: Vec<IllustStage>,
+    sam: SuffixTable<'a, 'a>,
+    sam_ind: Vec<IllustId>,
+}
+
+impl<'a> Default for IllustIndex<'a> {
+    fn default() -> Self {
+        Self::parse("[]".to_owned()).unwrap()
+    }
 }
 
 impl Page {
@@ -137,27 +147,38 @@ impl Illust {
 
 pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
-impl IllustIndex {
+impl<'a> IllustIndex<'a> {
     pub fn parse(s: String) -> serde_json::error::Result<Self> {
         let illusts: Vec<Map<String, Value>> = from_str(&s)?;
         let mut ids = Vec::with_capacity(illusts.len());
         info!("parsed {} objects", illusts.len());
 
+        let mut sam = String::new();
+        let mut sam_ind = Vec::new();
         let map = HashMap::from_iter(illusts.into_iter().map(|data| {
             // FIXME: do not unwrap
             let o = Illust::new(data).unwrap();
             ids.push(o.data.id);
+            sam.push_str(&o.intro);
+            for _ in 0..o.intro.len() {
+                sam_ind.push(o.data.id);
+            }
             (o.data.id, o)
         }));
 
         let mut stages = Vec::with_capacity(2);
         stages.resize_with(2, Default::default);
 
+        let n = sam.len();
+        info!("sam: {n} * 8 = {} MiB", (n * 8) >> 20);
+
         Ok(Self {
             map,
             ids,
             dirty: false,
             stages,
+            sam: SuffixTable::new(sam),
+            sam_ind,
         })
     }
 
@@ -275,6 +296,17 @@ impl IllustIndex {
             self.dirty = true;
         }
         stage.dirty = false;
+
+        self.sam = SuffixTable::new(self.ids.iter().map(|iid| &self.map[iid].intro).join(""));
+        self.sam_ind = self
+            .ids
+            .iter()
+            .flat_map(|iid| {
+                let n = self.map[iid].intro.len();
+                std::iter::repeat(*iid).take(n)
+            })
+            .collect_vec();
+
         delta
     }
 
@@ -291,24 +323,74 @@ impl IllustIndex {
         delta
     }
 
+    fn single_select(&self, pattern: &str) -> Vec<IllustId> {
+        self.sam
+            .positions(pattern)
+            .iter()
+            .sorted()
+            .map(|i| self.sam_ind[*i as usize])
+            .dedup()
+            .collect_vec()
+    }
+
+    fn _select_many_sam(&self, filters: &[String]) -> Vec<IllustId> {
+        // assert len(filters) > 0
+        let mut sets = filters
+            .iter()
+            .map(|patt| self.single_select(patt))
+            .collect_vec();
+        let i = sets
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| v.len())
+            .unwrap()
+            .0;
+        info!("matches: {:?}", sets.iter().map(|v| v.len()).collect_vec());
+        let off = sets.split_off(i + 1);
+        let mut inter = sets.pop().unwrap();
+        for vec in [sets, off] {
+            for o in vec {
+                let s: HashSet<IllustId, RandomState> = HashSet::from_iter(o.into_iter());
+                inter.retain(|e| s.contains(e));
+            }
+        }
+        inter
+    }
+
+    fn _select_best_sam(&self, filters: &[String]) -> Vec<&Illust> {
+        // assert len(filters) > 0
+        let a = filters
+            .iter()
+            .map(|patt| self.sam.positions(patt))
+            .min_by_key(|pos| pos.len())
+            .unwrap();
+        info!("min raw matches: {}", a.len());
+        a.iter()
+            .sorted()
+            .map(|p| self.sam_ind[*p as usize])
+            .dedup()
+            .map(|iid| &self.map[&iid])
+            .filter(|illust| filters[1..].iter().all(|tag| illust.intro.contains(tag)))
+            .collect_vec()
+    }
+
     pub fn select(&self, filters: &[String]) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
         if filters.is_empty() {
             return Box::new(self.iter());
         }
-        let ac = AhoCorasickBuilder::new()
-            .ascii_case_insensitive(true)
-            .build(filters);
-        let mut s = HashSet::new();
-        let n = filters.len();
-        Box::new(self.iter().filter(move |illust| {
-            s.clear();
-            for mat in ac.find_overlapping_iter(&illust.intro) {
-                s.insert(mat.pattern());
-                if s.len() == n {
-                    return true;
-                }
-            }
-            false
-        }))
+        let res = if filters.len() == 1 {
+            self.single_select(&filters[0])
+        } else {
+            // self._select_many_sam(filters)
+            return Box::new(self._select_best_sam(filters).into_iter());
+        };
+        /* assert_eq!(
+            res,
+            self.iter()
+                .filter(|illust| { filters.iter().all(|s| illust.intro.contains(s)) })
+                .map(|illust| illust.data.id)
+                .collect_vec()
+        ); */
+        Box::new(res.into_iter().map(|iid| &self.map[&iid]))
     }
 }

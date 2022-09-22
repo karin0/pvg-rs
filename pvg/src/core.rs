@@ -40,11 +40,11 @@ struct SavingCache<'a> {
 }
 
 #[derive(Debug)]
-pub struct Pvg {
+pub struct Pvg<'a> {
     pub conf: Config,
     #[allow(dead_code)]
     lock: std::fs::File,
-    index: RwLock<IllustIndex>,
+    index: RwLock<IllustIndex<'a>>,
     api: tokio::sync::RwLock<AuthedClient>,
     pixiv: DownloadClient,
     uid: String,
@@ -154,8 +154,8 @@ impl DownloadingFile {
 
 static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
 
-impl Pvg {
-    pub async fn new() -> Result<Self> {
+impl Pvg<'_> {
+    pub async fn new<'a>() -> Result<Pvg<'a>> {
         let t = Instant::now();
         let config = read_config()?;
         info!("config: {:?}", config);
@@ -585,7 +585,7 @@ fn measure_file(path: &Path) -> Result<Dimensions> {
     Ok(Dimensions(w.try_into()?, h.try_into()?))
 }
 
-impl Pvg {
+impl Pvg<'_> {
     fn _make_measure_queue(&self) -> MeasureQueue {
         let mut vec = vec![];
         let mut n = 0;
@@ -682,6 +682,10 @@ struct SelectedIllust<'a>(
     &'a str,
     Vec<&'a str>,
     Vec<SelectedPage<'a>>,
+    &'a str,
+    &'a str,
+    u16,
+    u16,
 );
 
 #[derive(Debug, Serialize)]
@@ -689,7 +693,7 @@ struct SelectResponse<'a> {
     items: Vec<SelectedIllust<'a>>,
 }
 
-impl Pvg {
+impl Pvg<'_> {
     pub fn select(&self, filters: &[String]) -> serde_json::Result<String> {
         // TODO: do this all sync can block for long.
         let now = Instant::now();
@@ -720,11 +724,15 @@ impl Pvg {
                 } */
                 SelectedIllust(
                     i.id,
-                    i.title.as_ref(),
+                    &i.title,
                     i.user.id,
-                    i.user.name.as_ref(),
+                    &i.user.name,
                     tags,
                     pages,
+                    &i.caption,
+                    &i.create_date,
+                    i.sanity_level,
+                    i.x_restrict,
                 )
             })
             .collect();

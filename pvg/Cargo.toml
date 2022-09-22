@@ -22,5 +22,7 @@ fs2 = "0"
 futures = "0.3"
 rayon = "1.5"
 image = "0"
+suffix = "1"
+itertools = "0.10.5"
 
 pixiv = { path = "../pixiv" }

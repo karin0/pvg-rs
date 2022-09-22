@@ -26,7 +26,7 @@ extern crate log;
 
 #[get("/img/{iid}/{pn}")]
 async fn image(
-    app: web::Data<Pvg>,
+    app: web::Data<Pvg<'_>>,
     path: web::Path<(IllustId, PageNum)>,
 ) -> io::Result<Either<NamedFile, HttpResponse>> {
     let (iid, pn) = path.into_inner();
@@ -61,7 +61,7 @@ struct SelectPayload {
 }
 
 #[post("/select")]
-async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl Responder {
+async fn select(app: web::Data<Pvg<'_>>, filters: web::Json<SelectPayload>) -> impl Responder {
     let r = app.select(&filters.filters).map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -73,25 +73,25 @@ fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
 }
 
 #[get("/action/qupd")]
-async fn quick_update(app: web::Data<Pvg>) -> io::Result<&'static str> {
+async fn quick_update(app: web::Data<Pvg<'_>>) -> io::Result<&'static str> {
     app.quick_update().await.map_err(mapper)?;
     Ok("ok")
 }
 
 #[get("/action/download")]
-async fn download_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
+async fn download_all(app: web::Data<Pvg<'_>>) -> io::Result<&'static str> {
     app.download_all().await.map_err(mapper)?;
     Ok("ok")
 }
 
 #[get("/action/measure")]
-async fn measure_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
+async fn measure_all(app: web::Data<Pvg<'_>>) -> io::Result<&'static str> {
     app.measure_all().await.map_err(mapper)?;
     Ok("ok")
 }
 
 #[get("/test")]
-async fn test(app: web::Data<Pvg>) -> impl Responder {
+async fn test(app: web::Data<Pvg<'_>>) -> impl Responder {
     let t = Instant::now();
     app.dump().await.unwrap();
     info!("dump: {} ms", t.elapsed().as_millis());
