@@ -52,8 +52,13 @@ pub struct Illust {
     pub page_count: u32,
     pub meta_pages: Vec<MetaPage>,
     pub tags: Vec<Tag>,
-    pub sanity_level: u32,
+    pub sanity_level: u16,
+    pub x_restrict: u16,
     pub visible: bool,
+    pub create_date: String,
+    pub caption: String,
+    #[serde(rename = "type")]
+    pub type_: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]

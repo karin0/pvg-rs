@@ -87,11 +87,15 @@ fn make_intro(data: &api::Illust) -> String {
         s.push('\\');
         s.push_str(&t.name);
     }
-    s.push_str(if data.sanity_level >= 6 {
-        "\\$nsfw"
+    s.push_str(if data.sanity_level == 6 {
+        "\\$h"
     } else {
-        "\\$sfw"
+        "\\$nh"
     });
+    s.push_str("\\$s");
+    s.push_str(&data.sanity_level.to_string());
+    s.push_str("\\$x");
+    s.push_str(&data.x_restrict.to_string());
     s
 }
 
