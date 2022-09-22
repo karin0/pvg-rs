@@ -106,6 +106,18 @@ fn make_intro(data: &api::Illust) -> String {
     s.push_str(&data.sanity_level.to_string());
     s.push_str("\\$x");
     s.push_str(&data.x_restrict.to_string());
+    if data.sanity_level != 2 {
+        s.push_str("\\$h");
+    }
+    if data.sanity_level >= 6 {
+        s.push_str("\\$r");
+    }
+    if data.width >= data.height {
+        s.push_str("\\$w");
+    }
+    if data.width <= data.height {
+        s.push_str("\\$t");
+    }
     s
 }
 
@@ -359,18 +371,23 @@ impl<'a> IllustIndex<'a> {
 
     fn _select_best_sam(&self, filters: &[String]) -> Vec<&Illust> {
         // assert len(filters) > 0
-        let a = filters
+        let (i, a) = filters
             .iter()
             .map(|patt| self.sam.positions(patt))
-            .min_by_key(|pos| pos.len())
+            .enumerate()
+            .min_by_key(|(_, pos)| pos.len())
             .unwrap();
-        info!("min raw matches: {}", a.len());
         a.iter()
             .sorted()
             .map(|p| self.sam_ind[*p as usize])
             .dedup()
             .map(|iid| &self.map[&iid])
-            .filter(|illust| filters[1..].iter().all(|tag| illust.intro.contains(tag)))
+            .filter(|illust| {
+                filters
+                    .iter()
+                    .enumerate()
+                    .all(|(p, tag)| p == i || illust.intro.contains(tag))
+            })
             .collect_vec()
     }
 
