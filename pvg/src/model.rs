@@ -1,5 +1,5 @@
 use aho_corasick::AhoCorasickBuilder;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use pixiv::model as api;
 use pixiv::IllustId;
 use serde::de::value::MapDeserializer;
@@ -59,12 +59,17 @@ pub struct Illust {
 }
 
 #[derive(Debug, Default, Clone)]
+struct IllustStage {
+    ids: Vec<IllustId>,
+    dirty: bool,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
-    staged: Vec<IllustId>,
     pub dirty: bool,
-    stage_dirty: bool,
+    stages: Vec<IllustStage>,
 }
 
 impl Page {
@@ -141,12 +146,14 @@ impl IllustIndex {
             (o.data.id, o)
         }));
 
+        let mut stages = Vec::with_capacity(2);
+        stages.resize_with(2, Default::default);
+
         Ok(Self {
             map,
             ids,
-            staged: vec![],
             dirty: false,
-            stage_dirty: false,
+            stages,
         })
     }
 
@@ -218,15 +225,23 @@ impl IllustIndex {
         self.ids.iter().map(move |id| &self.map[id])
     }
 
-    pub fn stage(&mut self, illust: Map<String, Value>) -> Result<bool> {
+    pub fn ensure_stage_clean(&self, stage: usize) -> Result<()> {
+        let stage = &self.stages[stage];
+        if stage.dirty || !stage.ids.is_empty() {
+            bail!("stage not clean");
+        }
+        Ok(())
+    }
+
+    pub fn stage(&mut self, stage: usize, illust: Map<String, Value>) -> Result<bool> {
         let illust = Illust::new(illust)?;
         let id = illust.data.id;
+        let stage = &mut self.stages[stage];
         if !illust.data.visible {
-            let has = self.map.contains_key(&id);
-            if has {
+            if let Some(old) = self.map.get(&id) {
                 warn!(
                     "{} ({} - {}) is deleted from upstream, which has luckily been indexed.",
-                    id, illust.data.title, illust.data.user.name
+                    id, old.data.title, old.data.user.name
                 );
                 return Ok(false);
             }
@@ -238,36 +253,37 @@ impl IllustIndex {
             assert!(r.is_none());
         } else if self.map.insert(illust.data.id, illust).is_some() {
             // TODO: how to know if this illust is updated?
-            self.stage_dirty = true;
+            stage.dirty = true;
             return Ok(false);
         }
-        self.stage_dirty = true;
-        self.staged.push(id);
+        stage.dirty = true;
+        stage.ids.push(id);
         Ok(true)
     }
 
-    pub fn commit(&mut self) -> usize {
-        // self.staged.reverse();
-        // self.ids.append(&mut self.staged);
-        let delta = self.staged.len();
+    pub fn commit(&mut self, stage: usize) -> usize {
+        let stage = &mut self.stages[stage];
+        let delta = stage.ids.len();
         let n = self.ids.len();
-        self.ids.extend(self.staged.drain(..).rev());
+        self.ids.extend(stage.ids.drain(..).rev());
         assert_eq!(self.ids.len(), n + delta);
-        if delta > 0 || self.stage_dirty {
+        if delta > 0 || stage.dirty {
             self.dirty = true;
         }
-        self.stage_dirty = false;
+        stage.dirty = false;
         delta
     }
 
-    pub fn rollback(&mut self) -> usize {
-        let delta = self.staged.len();
+    pub fn rollback(&mut self, stage: usize) -> usize {
+        let stage = &mut self.stages[stage];
+        let delta = stage.ids.len();
         let n = self.map.len();
-        for id in self.staged.drain(..) {
+        for id in stage.ids.drain(..) {
             self.map.remove(&id);
         }
+        // Callers must ensure ids from different stages don't overlap
         assert_eq!(self.map.len(), n - delta);
-        self.stage_dirty = false;
+        stage.dirty = false;
         delta
     }
 

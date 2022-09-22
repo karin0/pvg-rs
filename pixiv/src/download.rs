@@ -46,7 +46,7 @@ impl DownloadClient {
         if st.is_success() || st.is_redirection() {
             Ok(r)
         } else {
-            error!("download error: {} {}", st, url);
+            error!("download: {:?} from {}", st, url);
             Err(Error::Pixiv(st.as_u16(), r.text().await?))
         }
     }

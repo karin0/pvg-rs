@@ -8,10 +8,9 @@ use strum_macros::IntoStaticStr;
 use url::Url;
 
 async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
-    info!("sending: {:?}", req);
     let r = req.send().await?;
     let st = r.status();
-    info!("got status: {:?}", st);
+    info!("{} from {}", st, r.url());
     if st.is_success() || st.is_redirection() {
         Ok(r.json().await?)
     } else {
@@ -19,7 +18,7 @@ async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
     }
 }
 
-#[derive(IntoStaticStr)]
+#[derive(Copy, Clone, Debug, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum BookmarkRestrict {
     Public,

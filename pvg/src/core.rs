@@ -19,10 +19,10 @@ use std::collections::HashSet;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
+use tokio::{fs, try_join};
 
 #[derive(Deserialize, Default)]
 struct LoadedCache {
@@ -60,12 +60,30 @@ pub struct BookmarkPage {
     next_url: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct DownloadGuard(bool);
+
+impl DownloadGuard {
+    fn release(&mut self) {
+        self.0 = true;
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        if !self.0 {
+            bug!("unfinished download dropped");
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DownloadingFile {
     path: PathBuf,
     file: fs::File,
     time: Option<Instant>,
     size: usize,
+    guard: DownloadGuard,
 }
 
 impl DownloadingFile {
@@ -80,6 +98,7 @@ impl DownloadingFile {
             file,
             time: None,
             size: 0,
+            guard: DownloadGuard::default(),
         })
     }
 
@@ -93,7 +112,8 @@ impl DownloadingFile {
         Ok(())
     }
 
-    pub async fn commit(self, path: &Path) -> io::Result<()> {
+    pub async fn commit(mut self, path: &Path) -> io::Result<()> {
+        self.guard.release();
         drop(self.file);
         if let Err(e) = fs::rename(&self.path, path).await {
             critical!("{:?}: COMMIT FAILED: {}", self.path, e);
@@ -116,7 +136,8 @@ impl DownloadingFile {
         }
     }
 
-    pub async fn rollback(self) {
+    pub async fn rollback(mut self) {
+        self.guard.release();
         drop(self.file);
         if let Err(e) = fs::remove_file(&self.path).await {
             critical!(
@@ -284,35 +305,30 @@ impl Pvg {
         Ok(())
     }
 
-    fn _quick_update_with_page(&self, r: Vec<Map<String, Value>>) -> Result<bool> {
+    fn _quick_update_with_page(&self, stage: usize, r: Vec<Map<String, Value>>) -> Result<bool> {
         let mut updated = false;
         let mut index = self.index.write();
         for illust in r {
-            if index.stage(illust)? {
+            if index.stage(stage, illust)? {
                 updated = true;
             }
         }
         Ok(!updated)
     }
 
-    async fn _quick_update(&self) -> Result<()> {
-        let mut api = self.api.try_write()?;
-        api.ensure_authed().await?;
-        drop(api);
+    async fn _quick_update(&self, stage: usize, restrict: BookmarkRestrict) -> Result<()> {
         let api = self.api.read().await;
-        let mut r: BookmarkPage = api
-            .user_bookmarks_illust(&self.uid, BookmarkRestrict::Private)
-            .await?;
+        let mut r: BookmarkPage = api.user_bookmarks_illust(&self.uid, restrict).await?;
         let mut pn = 1;
-        info!("page {}: {} illusts", pn, r.illusts.len());
-        if self._quick_update_with_page(r.illusts)? {
+        info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
+        if self._quick_update_with_page(stage, r.illusts)? {
             return Ok(());
         }
         while let Some(u) = r.next_url {
             r = api.call_url(&u).await?;
             pn += 1;
             info!("page {}: {} illusts", pn, r.illusts.len());
-            if self._quick_update_with_page(r.illusts)? {
+            if self._quick_update_with_page(stage, r.illusts)? {
                 break;
             }
         }
@@ -320,11 +336,32 @@ impl Pvg {
     }
 
     pub async fn quick_update(&self) -> Result<()> {
-        if let Err(e) = self._quick_update().await {
-            let n = self.index.write().rollback();
-            error!("quick update failed ({} rolled back): {}", n, e);
+        {
+            let index = self.index.read();
+            index.ensure_stage_clean(0)?;
+            index.ensure_stage_clean(1)?;
         }
-        info!("quick updated {} illusts", self.index.write().commit());
+        {
+            let mut api = self.api.try_write()?;
+            api.ensure_authed().await?;
+        }
+        let r = try_join!(
+            self._quick_update(0, BookmarkRestrict::Private),
+            self._quick_update(1, BookmarkRestrict::Public)
+        );
+        let mut index = self.index.write();
+        if let Err(e) = r {
+            error!(
+                "quick update failed ({} + {} rolled back): {}",
+                index.rollback(1),
+                index.rollback(0),
+                e,
+            );
+            return Err(e);
+        }
+        // commit private first
+        let n = index.commit(0);
+        info!("quick updated {} + {} illusts", index.commit(1), n);
         Ok(())
     }
 
@@ -472,7 +509,9 @@ impl Pvg {
 
     fn _make_download_queue(&self) -> Vec<(String, PathBuf)> {
         let not_found = self.not_found.lock();
-        self.index
+        let mut cnt_404 = 0;
+        let r = self
+            .index
             .read()
             .iter()
             .flat_map(|illust| illust.pages.iter())
@@ -483,13 +522,17 @@ impl Pvg {
                     if !not_found.contains(filename) {
                         return true;
                     } else {
-                        warn!("{:?}: skipping due to 404", path);
+                        cnt_404 += 1;
                     }
                 }
                 false
             })
             .map(|(src, path)| (src.url.clone(), path))
-            .collect()
+            .collect();
+        if cnt_404 > 0 {
+            warn!("{} pages skipped due to 404", cnt_404);
+        }
+        r
     }
 
     pub async fn download_all(&self) -> Result<()> {
@@ -510,7 +553,7 @@ impl Pvg {
         while let Some((path, res)) = futs.next().await {
             cnt += 1;
             match res {
-                Ok(path) => info!("{}/{}: downloaded {:?}", cnt, n, path),
+                Ok(_) => info!("{}/{}: downloaded {:?}", cnt, n, path),
                 Err(e) => {
                     cnt_fail += 1;
                     error!("{}/{}: download failed: {}", cnt, n, e);
