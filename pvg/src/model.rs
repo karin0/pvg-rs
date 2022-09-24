@@ -67,16 +67,16 @@ struct IllustStage {
 }
 
 #[derive(Debug, Clone)]
-pub struct IllustIndex<'a> {
+pub struct IllustIndex {
     pub map: HashMap<IllustId, Illust>,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     pub dirty: bool,
     stages: Vec<IllustStage>,
-    sam: SuffixTable<'a, 'a>,
+    sam: SuffixTable<'static, 'static>,
     sam_ind: Vec<IllustId>,
 }
 
-impl<'a> Default for IllustIndex<'a> {
+impl Default for IllustIndex {
     fn default() -> Self {
         Self::parse("[]".to_owned()).unwrap()
     }
@@ -159,7 +159,7 @@ impl Illust {
 
 pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
-impl<'a> IllustIndex<'a> {
+impl IllustIndex {
     pub fn parse(s: String) -> serde_json::error::Result<Self> {
         let illusts: Vec<Map<String, Value>> = from_str(&s)?;
         let mut ids = Vec::with_capacity(illusts.len());
