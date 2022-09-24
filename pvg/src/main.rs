@@ -21,7 +21,6 @@ use std::fmt::Debug;
 use std::io;
 use std::path::Path;
 use tokio::sync::oneshot;
-use tokio::time::Instant;
 
 #[macro_use]
 extern crate log;
@@ -93,12 +92,10 @@ async fn measure_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
     Ok("ok")
 }
 
-#[get("/test")]
-async fn test(app: web::Data<Pvg>) -> impl Responder {
-    let t = Instant::now();
-    app.dump().await.unwrap();
-    info!("dump: {} ms", t.elapsed().as_millis());
-    "ok"
+#[get("/action/clean")]
+async fn clean(app: web::Data<Pvg>) -> io::Result<&'static str> {
+    app.enforce_cache_limit().await;
+    Ok("ok")
 }
 
 #[get("/")]
@@ -132,7 +129,7 @@ async fn main() -> Result<()> {
             .service(quick_update)
             .service(download_all)
             .service(measure_all)
-            .service(test)
+            .service(clean)
             .service(index)
     })
     .bind(addr)?

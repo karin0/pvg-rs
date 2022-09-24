@@ -1,13 +1,13 @@
 use crate::bug;
 use crate::config::{read_config, Config};
 use crate::disk_lru::DiskLru;
-use crate::download::DownloadingFile;
+use crate::download::{DownloadingFile, DownloadingStream};
 use crate::model::{DimCache, Dimensions, IllustIndex};
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use futures::stream::FuturesUnordered;
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use image::GenericImageView;
 use parking_lot::{Mutex, RwLock};
 use pixiv::aapi::BookmarkRestrict;
@@ -145,28 +145,18 @@ impl Pvg {
 
         let mut vec = Vec::with_capacity(nav.len());
         let mut total_size = 0;
-        for illust in nav.iter() {
-            for page in &illust.pages {
-                let file = page.source.filename();
-                let path = config.pix_dir.join(file);
-                match fs::metadata(&path).await {
-                    Ok(meta) => {
-                        let size = meta.len();
-                        let time = meta
-                            .accessed()
-                            .or_else(|_| meta.modified())
-                            .or_else(|_| meta.created())
-                            .unwrap_or(SystemTime::UNIX_EPOCH);
-                        vec.push((file, size, time));
-                        total_size += size;
-                    }
-                    Err(e) => {
-                        if e.kind() != io::ErrorKind::NotFound {
-                            return Err(e.into());
-                        }
-                    }
-                }
-            }
+        let mut files = fs::read_dir(&config.pix_dir).await?;
+        while let Some(file) = files.next_entry().await? {
+            let meta = file.metadata().await?;
+            let file = file.file_name().into_string().unwrap();
+            let size = meta.len();
+            let time = meta
+                .accessed()
+                .or_else(|_| meta.modified())
+                .or_else(|_| meta.created())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            vec.push((file, size, time));
+            total_size += size;
         }
         info!(
             "disk: {} files, {:.2} MiB",
@@ -187,7 +177,7 @@ impl Pvg {
 
         let mut lru = DiskLru::new();
         for (file, size, _) in vec {
-            lru.insert(file.to_owned(), size);
+            lru.insert(file, size);
         }
 
         let db_init_size = nav.len();
@@ -354,14 +344,24 @@ impl Pvg {
         self.disk_lru.write().evict(limit)
     }
 
+    async fn _disk_evict_to(&self, limit: u64) {
+        while let Some(file) = self.disk_evict(limit) {
+            let path = self.page_path(file);
+            if let Err(e) = fs::remove_file(&path).await {
+                error!("failed to remove {:?}: {}", path, e);
+            }
+        }
+    }
+
     async fn disk_evict_all(&self) {
         if let Some(limit) = self.lru_limit {
-            while let Some(file) = self.disk_evict(limit) {
-                let path = self.page_path(file);
-                if let Err(e) = fs::remove_file(&path).await {
-                    error!("failed to remove {:?}: {}", path, e);
-                }
-            }
+            self._disk_evict_to(limit).await;
+        }
+    }
+
+    pub async fn enforce_cache_limit(&self) {
+        if let Some(limit) = self.conf.cache_limit {
+            self._disk_evict_to(limit).await;
         }
     }
 
@@ -373,7 +373,7 @@ impl Pvg {
         self: Arc<Self>,
         src: &str,
         path: PathBuf,
-    ) -> Result<impl Stream<Item = pixiv::reqwest::Result<Bytes>>> {
+    ) -> Result<impl Stream<Item = Result<Bytes>>> {
         info!("downloading {}", src);
         let mut tmp = self.open_temp(&path).await?;
         let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
@@ -393,10 +393,12 @@ impl Pvg {
             }
             Ok(r) => r,
         };
+        let size = remote.content_length();
         info!(
-            "{:?}: connection established in {:.3} secs",
+            "{:?}: connection established in {:.3} secs, {:?} B",
             path,
-            t.elapsed().as_secs_f32()
+            t.elapsed().as_secs_f32(),
+            size
         );
         tmp.start();
 
@@ -415,50 +417,26 @@ impl Pvg {
                         return;
                     }
                 } else {
-                    error!("{:?}: remote error", path);
                     drop(perm);
-                    tmp.rollback().await;
+                    match tmp.commit(&path, size).await {
+                        Err(e) => error!("{:?}: failed to save: {}", path, e),
+                        Ok(size) => {
+                            let file = path.file_name().unwrap().to_str().unwrap();
+                            {
+                                self.disk_lru.write().insert(file.to_string(), size);
+                            }
+                            self.disk_evict_all().await;
+                        }
+                    }
                     return;
                 }
             }
+            error!("{:?}: remote error", path);
             drop(perm);
-            match tmp.commit(&path).await {
-                Err(e) => error!("{:?}: failed to save: {}", path, e),
-                Ok(size) => {
-                    let file = path.file_name().unwrap().to_str().unwrap();
-                    {
-                        self.disk_lru.write().insert(file.to_string(), size);
-                    }
-                    self.disk_evict_all().await;
-                }
-            }
+            tmp.rollback().await;
         });
 
-        Ok(stream::unfold(
-            (remote, tx, path),
-            |(mut remote, tx, path)| async move {
-                match remote.chunk().await {
-                    Ok(Some(b)) => {
-                        if let Err(e) = tx.send(Some(b.clone())) {
-                            bug!("{:?}: send error: {}", path, e);
-                        }
-                        Some((Ok(b), (remote, tx, path)))
-                    }
-                    Err(e) => {
-                        error!("{:?}: remote streaming failed: {}", path, e);
-                        if let Err(e) = tx.send(None) {
-                            bug!("{:?}: none send error: {}", path, e);
-                        }
-                        Some((Err(e), (remote, tx, path)))
-                    }
-                    Ok(None) => {
-                        info!("{:?}: remote streaming done", path);
-                        drop(tx);
-                        None
-                    }
-                }
-            },
-        ))
+        Ok((DownloadingStream { remote, path, tx }).stream())
     }
 
     async fn _download_file(
@@ -482,6 +460,7 @@ impl Pvg {
             }
             Ok(r) => r,
         };
+        let size = r.content_length();
 
         tmp.start();
         let res = Self::_download_file(r, &mut tmp).await;
@@ -490,7 +469,7 @@ impl Pvg {
             tmp.rollback().await;
             return Err(e);
         }
-        Ok(tmp.commit(path).await?)
+        tmp.commit(path, size).await
     }
 
     async fn _downloader(&self, url: String, path: PathBuf) -> (PathBuf, Result<u64>) {

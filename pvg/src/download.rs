@@ -1,10 +1,12 @@
 use crate::{bug, critical};
 use actix_web::web::Bytes;
-use anyhow::Result;
+use anyhow::{bail, Result};
+use futures::{stream, Stream};
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 #[derive(Debug, Default)]
@@ -59,7 +61,20 @@ impl DownloadingFile {
         Ok(())
     }
 
-    pub async fn commit(mut self, path: &Path) -> io::Result<u64> {
+    pub async fn commit(self, path: &Path, size: Option<u64>) -> Result<u64> {
+        if let Some(expected) = size {
+            if self.size != expected as usize {
+                let size = self.size;
+                self.rollback().await;
+                bail!("expected {} bytes, written {}", expected, size);
+            }
+        } else {
+            warn!("unknown size, written {}", self.size);
+        }
+        Ok(self.do_commit(path).await?)
+    }
+
+    async fn do_commit(mut self, path: &Path) -> io::Result<u64> {
         self.guard.release();
         drop(self.file);
         if let Err(e) = fs::rename(&self.path, path).await {
@@ -96,5 +111,49 @@ impl DownloadingFile {
         } else {
             info!("{:?}: rolled back {} bytes", self.path, self.size);
         }
+    }
+}
+
+pub struct DownloadingStream {
+    pub remote: pixiv::reqwest::Response,
+    pub tx: UnboundedSender<Option<Bytes>>,
+    pub path: PathBuf,
+}
+
+impl DownloadingStream {
+    async fn f(mut self) -> Option<(Result<Bytes>, Option<Self>)> {
+        match self.remote.chunk().await {
+            Ok(Some(b)) => {
+                if let Err(e) = self.tx.send(Some(b.clone())) {
+                    bug!("{:?}: send error: {}", self.path, e);
+                    Some((Err(e.into()), None))
+                } else {
+                    Some((Ok(b), Some(self)))
+                }
+            }
+            Err(e) => {
+                error!("{:?}: remote streaming failed: {}", self.path, e);
+                Some((Err(e.into()), None))
+            }
+            Ok(None) => {
+                info!("{:?}: remote streaming done", self.path);
+                if let Err(e) = self.tx.send(None) {
+                    bug!("{:?}: done send error: {}", self.path, e);
+                }
+                None
+            }
+        }
+    }
+
+    async fn fold(this: Option<Self>) -> Option<(Result<Bytes>, Option<Self>)> {
+        if let Some(this) = this {
+            this.f().await
+        } else {
+            None
+        }
+    }
+
+    pub fn stream(self) -> impl Stream<Item = Result<Bytes>> {
+        stream::unfold(Some(self), DownloadingStream::fold)
     }
 }
