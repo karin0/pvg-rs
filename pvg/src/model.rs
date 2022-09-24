@@ -339,7 +339,7 @@ impl IllustIndex {
         self.sam
             .positions(pattern)
             .iter()
-            .sorted()
+            .sorted_unstable()
             .map(|i| self.sam_ind[*i as usize])
             .dedup()
             .collect_vec()
@@ -378,7 +378,7 @@ impl IllustIndex {
             .min_by_key(|(_, pos)| pos.len())
             .unwrap();
         a.iter()
-            .sorted()
+            .sorted_unstable()
             .map(|p| self.sam_ind[*p as usize])
             .dedup()
             .map(|iid| &self.map[&iid])

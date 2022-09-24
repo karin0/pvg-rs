@@ -1,4 +1,5 @@
 use crate::config::{read_config, Config};
+use crate::disk_lru::DiskLru;
 use crate::model::{DimCache, Dimensions, IllustIndex};
 use crate::{bug, critical};
 use actix_web::web::Bytes;
@@ -19,6 +20,8 @@ use std::collections::HashSet;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
@@ -52,6 +55,8 @@ pub struct Pvg {
     download_all_lock: tokio::sync::Mutex<()>,
     not_found: Mutex<HashSet<PathBuf>>,
     db_init_size: usize,
+    disk_lru: RwLock<DiskLru>,
+    lru_limit: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -112,7 +117,7 @@ impl DownloadingFile {
         Ok(())
     }
 
-    pub async fn commit(mut self, path: &Path) -> io::Result<()> {
+    pub async fn commit(mut self, path: &Path) -> io::Result<u64> {
         self.guard.release();
         drop(self.file);
         if let Err(e) = fs::rename(&self.path, path).await {
@@ -132,7 +137,7 @@ impl DownloadingFile {
             } else {
                 info!("{:?}: committed {} B", self.path, self.size);
             }
-            Ok(())
+            Ok(self.size as u64)
         }
     }
 
@@ -230,6 +235,54 @@ impl Pvg {
         info!("api: {} {}", api.state.user.name, api.state.user.id);
         let uid = api.state.user.id.to_string();
 
+        let mut vec = Vec::with_capacity(nav.len());
+        let mut total_size = 0;
+        for illust in nav.iter() {
+            for page in &illust.pages {
+                let file = page.source.filename();
+                let path = config.pix_dir.join(file);
+                match fs::metadata(&path).await {
+                    Ok(meta) => {
+                        let size = meta.len();
+                        let time = meta
+                            .accessed()
+                            .or_else(|_| meta.modified())
+                            .or_else(|_| meta.created())
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
+                        vec.push((file, size, time));
+                        total_size += size;
+                    }
+                    Err(e) => {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
+        }
+        info!(
+            "disk: {} files, {:.2} MiB",
+            vec.len(),
+            total_size as f32 / ((1 << 20) as f32)
+        );
+        let lru_limit = if let Some(limit) = config.cache_limit {
+            info!("lru {} {}", total_size, limit);
+            vec.sort_unstable_by_key(|(_, _, time)| time.to_owned());
+            if total_size > limit {
+                warn!("cache size over limit: {} > {}", total_size, limit);
+                Some(total_size)
+            } else {
+                Some(limit)
+            }
+        } else {
+            None
+        };
+
+        let mut lru = DiskLru::new();
+        for (file, size, _) in vec {
+            lru.insert(file.to_owned(), size);
+        }
+
         let db_init_size = nav.len();
         Ok(Pvg {
             conf: config,
@@ -242,6 +295,8 @@ impl Pvg {
             disk: Default::default(),
             not_found: Mutex::new(not_found),
             db_init_size,
+            disk_lru: RwLock::new(lru),
+            lru_limit,
         })
     }
 
@@ -369,12 +424,16 @@ impl Pvg {
         let index = self.index.read();
         let pn: usize = pn.try_into().ok()?;
         let src = &index.map.get(&iid)?.pages.get(pn)?.source;
-        let file: &Path = src.filename().as_ref();
-        if self.not_found.lock().contains(file) {
+        let file = src.filename();
+        let pile: &Path = file.as_ref();
+        if self.not_found.lock().contains(pile) {
             return None;
         }
+        if self.lru_limit.is_some() {
+            self.disk_lru.write().promote(file);
+        }
         let url = src.url.clone();
-        let path = self.conf.pix_dir.join(src.filename());
+        let path = self.page_path(pile);
         Some((url, path))
     }
 
@@ -384,8 +443,27 @@ impl Pvg {
         DownloadingFile::new(tmp_path).await
     }
 
+    fn disk_evict(&self, limit: u64) -> Option<String> {
+        self.disk_lru.write().evict(limit)
+    }
+
+    async fn disk_evict_all(&self) {
+        if let Some(limit) = self.lru_limit {
+            while let Some(file) = self.disk_evict(limit) {
+                let path = self.page_path(file);
+                if let Err(e) = fs::remove_file(&path).await {
+                    error!("failed to remove {:?}: {}", path, e);
+                }
+            }
+        }
+    }
+
+    fn page_path<T: AsRef<Path>>(&self, file: T) -> PathBuf {
+        self.conf.pix_dir.join(file)
+    }
+
     pub async fn download(
-        &self,
+        self: Arc<Self>,
         src: &str,
         path: PathBuf,
     ) -> Result<impl Stream<Item = pixiv::reqwest::Result<Bytes>>> {
@@ -437,8 +515,15 @@ impl Pvg {
                 }
             }
             drop(perm);
-            if let Err(e) = tmp.commit(&path).await {
-                error!("{:?}: failed to save: {}", path, e);
+            match tmp.commit(&path).await {
+                Err(e) => error!("{:?}: failed to save: {}", path, e),
+                Ok(size) => {
+                    let file = path.file_name().unwrap().to_str().unwrap();
+                    {
+                        self.disk_lru.write().insert(file.to_string(), size);
+                    }
+                    self.disk_evict_all().await;
+                }
             }
         });
 
@@ -479,7 +564,7 @@ impl Pvg {
         Ok(())
     }
 
-    async fn _downloader_inner(&self, url: &str, path: &Path) -> Result<()> {
+    async fn _downloader_inner(&self, url: &str, path: &Path) -> Result<u64> {
         let perm = DOWNLOAD_SEMA.acquire().await?;
         let mut tmp = self.open_temp(path).await?;
         let r = match self.pixiv.download(url).await {
@@ -498,28 +583,28 @@ impl Pvg {
             tmp.rollback().await;
             return Err(e);
         }
-        tmp.commit(path).await?;
-        Ok(())
+        Ok(tmp.commit(path).await?)
     }
 
-    async fn _downloader(&self, url: String, path: PathBuf) -> (PathBuf, Result<()>) {
+    async fn _downloader(&self, url: String, path: PathBuf) -> (PathBuf, Result<u64>) {
         let r = self._downloader_inner(&url, &path).await;
         (path, r)
     }
 
     fn _make_download_queue(&self) -> Vec<(String, PathBuf)> {
         let not_found = self.not_found.lock();
+        let disk = self.disk_lru.read();
         let mut cnt_404 = 0;
         let r = self
             .index
             .read()
             .iter()
             .flat_map(|illust| illust.pages.iter())
-            .map(|page| (&page.source, self.conf.pix_dir.join(page.source.filename())))
-            .filter(|(_, path)| {
-                if !path.exists() {
-                    let filename: &Path = path.file_name().unwrap().as_ref();
-                    if !not_found.contains(filename) {
+            .map(|page| (&page.source, page.source.filename()))
+            .filter(|(_, file)| {
+                if !disk.contains(file) {
+                    let file: &Path = file.as_ref();
+                    if !not_found.contains(file) {
                         return true;
                     } else {
                         cnt_404 += 1;
@@ -527,7 +612,7 @@ impl Pvg {
                 }
                 false
             })
-            .map(|(src, path)| (src.url.clone(), path))
+            .map(|(src, file)| (src.url.clone(), self.page_path(file)))
             .collect();
         if cnt_404 > 0 {
             warn!("{} pages skipped due to 404", cnt_404);
@@ -536,6 +621,9 @@ impl Pvg {
     }
 
     pub async fn download_all(&self) -> Result<()> {
+        if self.lru_limit.is_some() {
+            bail!("cache limit is set, refusing to download all");
+        }
         // FIXME: generate the whole queue in sync for now to avoid the use of async locks.
         let _ = self.download_all_lock.try_lock()?;
         let t = Instant::now();
@@ -553,7 +641,12 @@ impl Pvg {
         while let Some((path, res)) = futs.next().await {
             cnt += 1;
             match res {
-                Ok(_) => info!("{}/{}: downloaded {:?}", cnt, n, path),
+                Ok(size) => {
+                    info!("{}/{}: downloaded {:?} ({} KiB)", cnt, n, path, size >> 10);
+                    self.disk_lru
+                        .write()
+                        .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
+                }
                 Err(e) => {
                     cnt_fail += 1;
                     error!("{}/{}: download failed: {}", cnt, n, e);

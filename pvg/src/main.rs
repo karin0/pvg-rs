@@ -1,5 +1,6 @@
 mod config;
 mod core;
+mod disk_lru;
 mod model;
 mod util;
 
@@ -29,6 +30,7 @@ async fn image(
     app: web::Data<Pvg>,
     path: web::Path<(IllustId, PageNum)>,
 ) -> io::Result<Either<NamedFile, HttpResponse>> {
+    let app = app.into_inner();
     let (iid, pn) = path.into_inner();
     match app.get_source(iid, pn) {
         Some((src, path)) => match NamedFile::open_async(&path).await {

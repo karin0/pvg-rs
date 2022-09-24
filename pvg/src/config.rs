@@ -14,6 +14,7 @@ struct ConfigFile {
     static_dir: Option<PathBuf>,
     host: Option<IpAddr>,
     port: Option<u16>,
+    cache_limit: Option<u64>,
     // pix_dir: String,
     // tmp_dir: String,
 }
@@ -29,6 +30,7 @@ pub struct Config {
     pub cache_file: PathBuf,
     pub static_dir: PathBuf,
     pub addr: SocketAddr,
+    pub cache_limit: Option<u64>,
 }
 
 fn ensure_dir(dir: &Path) {
@@ -89,5 +91,6 @@ pub fn read_config() -> Result<Config> {
         cache_file: at("cache.json"),
         static_dir,
         addr,
+        cache_limit: config.cache_limit,
     })
 }

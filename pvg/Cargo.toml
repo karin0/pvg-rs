@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time"] }
 actix-web = "4"
 anyhow = { version = "1", features = ["backtrace"] }
 log = "0.4"
@@ -23,5 +23,6 @@ rayon = "1.5"
 image = "0"
 suffix = "1"
 itertools = "0.10.5"
+lru = "0"
 
 pixiv = { path = "../pixiv" }
