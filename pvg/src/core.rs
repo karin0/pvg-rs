@@ -1,7 +1,8 @@
+use crate::bug;
 use crate::config::{read_config, Config};
 use crate::disk_lru::DiskLru;
+use crate::download::DownloadingFile;
 use crate::model::{DimCache, Dimensions, IllustIndex};
-use crate::{bug, critical};
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
@@ -22,7 +23,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio::{fs, try_join};
@@ -63,98 +63,6 @@ pub struct Pvg {
 pub struct BookmarkPage {
     illusts: Vec<Map<String, Value>>,
     next_url: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct DownloadGuard(bool);
-
-impl DownloadGuard {
-    fn release(&mut self) {
-        self.0 = true;
-    }
-}
-
-impl Drop for DownloadGuard {
-    fn drop(&mut self) {
-        if !self.0 {
-            bug!("unfinished download dropped");
-        }
-    }
-}
-
-#[derive(Debug)]
-struct DownloadingFile {
-    path: PathBuf,
-    file: fs::File,
-    time: Option<Instant>,
-    size: usize,
-    guard: DownloadGuard,
-}
-
-impl DownloadingFile {
-    pub async fn new(path: PathBuf) -> Result<Self> {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await?;
-        Ok(Self {
-            path,
-            file,
-            time: None,
-            size: 0,
-            guard: DownloadGuard::default(),
-        })
-    }
-
-    pub fn start(&mut self) {
-        self.time = Some(Instant::now());
-    }
-
-    pub async fn write(&mut self, b: &Bytes) -> io::Result<()> {
-        self.file.write_all(b).await?;
-        self.size += b.len();
-        Ok(())
-    }
-
-    pub async fn commit(mut self, path: &Path) -> io::Result<u64> {
-        self.guard.release();
-        drop(self.file);
-        if let Err(e) = fs::rename(&self.path, path).await {
-            critical!("{:?}: COMMIT FAILED: {}", self.path, e);
-            Err(e)
-        } else {
-            if let Some(t) = self.time {
-                let t = t.elapsed().as_secs_f32();
-                let kib = self.size as f32 / 1024.;
-                info!(
-                    "{:?}: committed {:.3} KiB in {:.3} secs ({:.3} KiB/s)",
-                    self.path,
-                    kib,
-                    t,
-                    kib / t
-                );
-            } else {
-                info!("{:?}: committed {} B", self.path, self.size);
-            }
-            Ok(self.size as u64)
-        }
-    }
-
-    pub async fn rollback(mut self) {
-        self.guard.release();
-        drop(self.file);
-        if let Err(e) = fs::remove_file(&self.path).await {
-            critical!(
-                "{:?}: ROLLBACK FAILED ({} bytes): {}",
-                self.path,
-                self.size,
-                e
-            );
-        } else {
-            info!("{:?}: rolled back {} bytes", self.path, self.size);
-        }
-    }
 }
 
 static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
@@ -266,7 +174,6 @@ impl Pvg {
             total_size as f32 / ((1 << 20) as f32)
         );
         let lru_limit = if let Some(limit) = config.cache_limit {
-            info!("lru {} {}", total_size, limit);
             vec.sort_unstable_by_key(|(_, _, time)| time.to_owned());
             if total_size > limit {
                 warn!("cache size over limit: {} > {}", total_size, limit);

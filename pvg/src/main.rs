@@ -1,6 +1,7 @@
 mod config;
 mod core;
 mod disk_lru;
+mod download;
 mod model;
 mod util;
 
