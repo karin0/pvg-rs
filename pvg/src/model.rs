@@ -97,20 +97,17 @@ fn make_intro(data: &api::Illust) -> String {
         s.push('\\');
         s.push_str(&t.name);
     }
-    s.push_str(if data.sanity_level == 6 {
-        "\\$h"
-    } else {
-        "\\$nh"
-    });
     s.push_str("\\$s");
     s.push_str(&data.sanity_level.to_string());
     s.push_str("\\$x");
     s.push_str(&data.x_restrict.to_string());
+    s.push_str("\\$r");
+    s.push_str(&(data.x_restrict + data.sanity_level / 2).to_string());
     if data.sanity_level != 2 {
-        s.push_str("\\$h");
+        s.push_str("\\$n");
     }
     if data.sanity_level >= 6 {
-        s.push_str("\\$r");
+        s.push_str("\\$h");
     }
     if data.width >= data.height {
         s.push_str("\\$w");
@@ -163,7 +160,6 @@ impl IllustIndex {
     pub fn parse(s: String) -> serde_json::error::Result<Self> {
         let illusts: Vec<Map<String, Value>> = from_str(&s)?;
         let mut ids = Vec::with_capacity(illusts.len());
-        info!("parsed {} objects", illusts.len());
 
         let mut sam = String::new();
         let mut sam_ind = Vec::new();

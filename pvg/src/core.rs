@@ -150,11 +150,14 @@ impl Pvg {
             let meta = file.metadata().await?;
             let file = file.file_name().into_string().unwrap();
             let size = meta.len();
-            let time = meta
-                .accessed()
-                .or_else(|_| meta.modified())
-                .or_else(|_| meta.created())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let time = if config.cache_limit.is_some() {
+                meta.accessed()
+                    .or_else(|_| meta.modified())
+                    .or_else(|_| meta.created())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            } else {
+                SystemTime::UNIX_EPOCH
+            };
             vec.push((file, size, time));
             total_size += size;
         }
