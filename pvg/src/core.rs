@@ -710,7 +710,7 @@ impl Pvg {
                     tags,
                     pages,
                     &i.create_date,
-                    i.sanity_level + 2 * i.x_restrict,
+                    (i.sanity_level >> 1) + i.x_restrict,
                 )
             })
             .collect();
