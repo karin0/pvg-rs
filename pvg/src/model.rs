@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use itertools::Itertools;
-use pixiv::model as api;
 use pixiv::IllustId;
+use pixiv::{model as api, PageNum};
 use serde::de::value::MapDeserializer;
 use serde::Deserialize;
 use serde_json::{from_str, Map, Value};
@@ -256,6 +256,10 @@ impl IllustIndex {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Illust> {
         self.ids.iter().map(move |id| &self.map[id])
+    }
+
+    pub fn get_page(&self, iid: IllustId, pn: PageNum) -> Option<&Page> {
+        self.map.get(&iid).and_then(|i| i.pages.get(pn as usize))
     }
 
     pub fn ensure_stage_clean(&self, stage: usize) -> Result<()> {

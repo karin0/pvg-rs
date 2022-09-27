@@ -3,6 +3,7 @@ use crate::config::{read_config, Config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
 use crate::model::{DimCache, Dimensions, IllustIndex};
+use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
@@ -57,6 +58,7 @@ pub struct Pvg {
     db_init_size: usize,
     disk_lru: RwLock<DiskLru>,
     lru_limit: Option<u64>,
+    upscaler: Option<Upscaler>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -184,6 +186,11 @@ impl Pvg {
         }
 
         let db_init_size = nav.len();
+        let upscaler = if let Some(ref path) = config.upscaler_path {
+            Some(Upscaler::new(path.clone(), &config).await?)
+        } else {
+            None
+        };
         Ok(Pvg {
             conf: config,
             lock,
@@ -197,6 +204,7 @@ impl Pvg {
             db_init_size,
             disk_lru: RwLock::new(lru),
             lru_limit,
+            upscaler,
         })
     }
 
@@ -322,8 +330,7 @@ impl Pvg {
 
     pub fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
         let index = self.index.read();
-        let pn: usize = pn.try_into().ok()?;
-        let src = &index.map.get(&iid)?.pages.get(pn)?.source;
+        let src = &index.get_page(iid, pn)?.source;
         let file = src.filename();
         let pile: &Path = file.as_ref();
         if self.not_found.lock().contains(pile) {
@@ -335,6 +342,23 @@ impl Pvg {
         let url = src.url.clone();
         let path = self.page_path(pile);
         Some((url, path))
+    }
+
+    pub async fn upscale(&self, iid: IllustId, pn: PageNum, scale: u8) -> Result<PathBuf> {
+        let index = self.index.read();
+        let src = &index.get_page(iid, pn).context("no such page")?.source;
+        let file = src.filename();
+        let out_file = format!("{}_{}x.png", file.replace('.', "_"), scale);
+        let out_path = self.conf.upscale_dir.join(&out_file);
+        if fs::metadata(&out_path).await.is_ok() {
+            return Ok(out_path);
+        }
+        // TODO: manage space of upscaled files in lru cache
+        // TODO: download if source doesn't exist
+        // TODO: handle if already started
+        let upscaler = self.upscaler.as_ref().context("no upscaler configured")?;
+        upscaler.run(file, out_file, scale).await?;
+        Ok(out_path)
     }
 
     async fn open_temp(&self, path: &Path) -> Result<DownloadingFile> {
@@ -683,16 +707,17 @@ impl Pvg {
             .rev()
             .map(|illust| {
                 let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
+                let mut curr_w = 0;
+                let mut curr_h = 0;
                 let pages: Vec<SelectedPage> = illust
                     .pages
                     .iter()
                     .map(|page| {
-                        let (w, h) = if let Some(d) = page.dimensions {
-                            (d.0.get(), d.1.get())
-                        } else {
-                            (0, 0)
+                        if let Some(d) = page.dimensions {
+                            curr_w = d.0.get();
+                            curr_h = d.1.get();
                         };
-                        SelectedPage(w, h, "img", page.source.filename())
+                        SelectedPage(curr_w, curr_h, "img", page.source.filename())
                     })
                     .collect();
                 let i = &illust.data;

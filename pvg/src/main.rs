@@ -3,6 +3,7 @@ mod core;
 mod disk_lru;
 mod download;
 mod model;
+mod upscale;
 mod util;
 
 use crate::core::Pvg;
@@ -98,6 +99,29 @@ async fn clean(app: web::Data<Pvg>) -> io::Result<&'static str> {
     Ok("ok")
 }
 
+#[derive(Deserialize)]
+struct UpscaleForm {
+    pid: IllustId,
+    ind: PageNum,
+    ratio: f32,
+}
+
+#[post("/upscale")]
+async fn do_upscale(app: web::Data<Pvg>, form: web::Form<UpscaleForm>) -> io::Result<NamedFile> {
+    let scale = if form.ratio <= 2.0 {
+        2
+    } else if form.ratio <= 3.0 {
+        3
+    } else {
+        4
+    };
+    let path = app
+        .upscale(form.pid, form.ind, scale)
+        .await
+        .map_err(mapper)?;
+    NamedFile::open_async(path).await
+}
+
 #[get("/")]
 async fn index(req: HttpRequest) -> impl Responder {
     let index: &'static Path = *req.app_data().unwrap();
@@ -130,6 +154,7 @@ async fn main() -> Result<()> {
             .service(download_all)
             .service(measure_all)
             .service(clean)
+            .service(do_upscale)
             .service(index)
     })
     .bind(addr)?

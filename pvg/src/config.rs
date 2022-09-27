@@ -15,6 +15,7 @@ struct ConfigFile {
     host: Option<IpAddr>,
     port: Option<u16>,
     cache_limit: Option<u64>,
+    upscaler_path: Option<PathBuf>,
     // pix_dir: String,
     // tmp_dir: String,
 }
@@ -31,6 +32,8 @@ pub struct Config {
     pub static_dir: PathBuf,
     pub addr: SocketAddr,
     pub cache_limit: Option<u64>,
+    pub upscaler_path: Option<PathBuf>,
+    pub upscale_dir: PathBuf,
 }
 
 fn ensure_dir(dir: &Path) {
@@ -92,5 +95,7 @@ pub fn read_config() -> Result<Config> {
         static_dir,
         addr,
         cache_limit: config.cache_limit,
+        upscaler_path: config.upscaler_path,
+        upscale_dir: at_dir("upscale"),
     })
 }
