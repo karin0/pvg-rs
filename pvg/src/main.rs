@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
     let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
     let addr = core.conf.addr;
     let data = web::Data::new(core);
-    let pvg = data.clone();
+    let pvg = data.clone().into_inner();
     let server = HttpServer::new(move || {
         let statics = actix_files::Files::new("/s", static_dir);
         App::new()
@@ -161,6 +161,12 @@ async fn main() -> Result<()> {
     .disable_signals()
     .run();
     info!("listening on {}", addr);
+    let ip = addr.ip();
+    if ip.is_loopback() || ip.is_unspecified() {
+        info!("open via http://localhost:{}", addr.port());
+    } else {
+        info!("open via http://{}", addr);
+    }
     let handle = server.handle();
 
     let (tx, mut rx) = oneshot::channel();
