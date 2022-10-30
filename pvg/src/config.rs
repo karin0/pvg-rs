@@ -16,8 +16,9 @@ struct ConfigFile {
     port: Option<u16>,
     cache_limit: Option<u64>,
     upscaler_path: Option<PathBuf>,
-    pub first_time_pn_limit: Option<u32>,
-    pub disable_select: Option<bool>,
+    first_time_pn_limit: Option<u32>,
+    disable_select: Option<bool>,
+    worker_delay_secs: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -37,6 +38,7 @@ pub struct Config {
     pub upscale_dir: PathBuf,
     pub first_time_pn_limit: Option<u32>,
     pub disable_select: bool,
+    pub worker_delay_secs: u32,
 }
 
 fn ensure_dir(dir: &Path) {
@@ -103,5 +105,6 @@ pub fn read_config() -> Result<Config> {
         upscale_dir: at_dir("upscale"),
         first_time_pn_limit: config.first_time_pn_limit,
         disable_select: config.disable_select.unwrap_or(false),
+        worker_delay_secs: config.worker_delay_secs.unwrap_or(0),
     })
 }

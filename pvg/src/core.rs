@@ -10,7 +10,8 @@ use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
 use image::GenericImageView;
-use parking_lot::{Mutex, RwLock};
+use itertools::Itertools;
+use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use pixiv::aapi::BookmarkRestrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
@@ -216,6 +217,10 @@ impl Pvg {
         })
     }
 
+    fn is_worker(&self) -> bool {
+        self.conf.worker_delay_secs > 0
+    }
+
     fn dump_index(&self) -> Result<(Option<Vec<u8>>, DimCache)> {
         let index = self.index.read();
         let db;
@@ -310,7 +315,9 @@ impl Pvg {
             .await?
             .user_bookmarks_illust(&self.uid, restrict)
             .await?;
-        info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
+        if !self.is_worker() {
+            info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
+        }
         if self._quick_update_with_page(stage, r.illusts)? {
             return Ok(());
         }
@@ -320,12 +327,31 @@ impl Pvg {
                 break;
             }
             r = self.auth().await?.call_url(&u).await?;
-            info!("page {}: {} illusts", pn, r.illusts.len());
+            if !self.is_worker() {
+                info!("page {}: {} illusts", pn, r.illusts.len());
+            }
             if self._quick_update_with_page(stage, r.illusts)? {
                 break;
             }
         }
         Ok(())
+    }
+
+    fn commit_stage(
+        &self,
+        index: &mut RwLockWriteGuard<IllustIndex>,
+        stage: usize,
+        name: &'static str,
+    ) -> usize {
+        if self.is_worker() {
+            let a = index.peek(stage);
+            if !a.is_empty() {
+                let n = a.len();
+                let s = a.iter().map(|i| i.to_string()).join(", ");
+                info!("{name}: {n} illusts: {s}");
+            }
+        }
+        index.commit(stage)
     }
 
     pub async fn quick_update(&self) -> Result<(usize, usize)> {
@@ -356,9 +382,11 @@ impl Pvg {
             return Err(e);
         }
         // commit private first
-        let n_pri = index.commit(0);
-        let n_pub = index.commit(1);
-        info!("quick updated {} + {} illusts", n_pub, n_pri);
+        let n_pri = self.commit_stage(&mut index, 0, "private");
+        let n_pub = self.commit_stage(&mut index, 1, "public");
+        if !self.is_worker() {
+            info!("quick updated {} + {} illusts", n_pub, n_pri);
+        }
         Ok((n_pri, n_pub))
     }
 
@@ -627,8 +655,9 @@ impl Pvg {
             self.not_found.lock().extend(the_404.into_iter());
         }
         if cnt_fail > 0 {
-            bail!("{} downloads failed", cnt_fail);
+            bail!("failed to download {} pages out from {}", cnt_fail, cnt);
         }
+        info!("downloaded {cnt} pages");
         Ok(cnt)
     }
 }
@@ -836,5 +865,27 @@ impl Pvg {
         }
         info!("moved {n} orphans");
         n
+    }
+
+    async fn worker_body(&self) -> Result<()> {
+        let (n, m) = self.quick_update().await?;
+        if n > 0 || m > 0 {
+            self.download_all().await?;
+        }
+        Ok(())
+    }
+
+    pub fn worker_start(self: Arc<Self>) {
+        if self.conf.worker_delay_secs > 0 {
+            let d = std::time::Duration::from_secs(self.conf.worker_delay_secs as u64);
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = self.worker_body().await {
+                        error!("worker: {}", e);
+                    }
+                    tokio::time::sleep(d).await;
+                }
+            });
+        }
     }
 }

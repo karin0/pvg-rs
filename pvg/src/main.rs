@@ -145,10 +145,10 @@ async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
-    if std::env::var("JOURNAL_STREAM").is_err() {
-        pretty_env_logger::init_timed();
-    } else {
+    if std::env::var("JOURNAL_STREAM").is_ok() {
         pretty_env_logger::init();
+    } else {
+        pretty_env_logger::init_timed();
     }
 
     let core = Pvg::new().await?;
@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
         info!("open via http://{}", addr);
     }
     let handle = server.handle();
+    pvg.clone().worker_start();
 
     let (tx, mut rx) = oneshot::channel();
     let mut tx = Some(tx);

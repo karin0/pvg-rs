@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::model::{Response, User};
-use log::info;
+use log::debug;
 use md5::{digest::Update, Digest, Md5};
 use once_cell::sync::Lazy;
 use reqwest::RequestBuilder;
@@ -38,7 +38,7 @@ pub async fn auth(req: RequestBuilder, refresh_token: &str) -> Result<Response> 
         .await?;
     let code = res.status().as_u16();
     let text = res.text().await?;
-    info!("auth: {} {}", code, text);
+    debug!("auth: {}", code);
     // pixivpy_async
     match code {
         200 | 301 | 302 => Ok(from_str(&text)?),

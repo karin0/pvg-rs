@@ -74,6 +74,7 @@ pub struct IllustIndex {
     stages: Vec<IllustStage>,
     sam: SuffixTable<'static, 'static>,
     sam_ind: Vec<IllustId>,
+    disable_select: bool,
 }
 
 impl Page {
@@ -183,6 +184,7 @@ impl IllustIndex {
             stages,
             sam: SuffixTable::new(sam),
             sam_ind,
+            disable_select,
         })
     }
 
@@ -294,6 +296,10 @@ impl IllustIndex {
         Ok(true)
     }
 
+    pub fn peek(&self, stage: usize) -> &[IllustId] {
+        &self.stages[stage].ids
+    }
+
     pub fn commit(&mut self, stage: usize) -> usize {
         let stage = &mut self.stages[stage];
         let delta = stage.ids.len();
@@ -305,15 +311,17 @@ impl IllustIndex {
         }
         stage.dirty = false;
 
-        self.sam = SuffixTable::new(self.ids.iter().map(|iid| &self.map[iid].intro).join(""));
-        self.sam_ind = self
-            .ids
-            .iter()
-            .flat_map(|iid| {
-                let n = self.map[iid].intro.len();
-                std::iter::repeat(*iid).take(n)
-            })
-            .collect_vec();
+        if !self.disable_select {
+            self.sam = SuffixTable::new(self.ids.iter().map(|iid| &self.map[iid].intro).join(""));
+            self.sam_ind = self
+                .ids
+                .iter()
+                .flat_map(|iid| {
+                    let n = self.map[iid].intro.len();
+                    std::iter::repeat(*iid).take(n)
+                })
+                .collect_vec();
+        }
 
         delta
     }

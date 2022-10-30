@@ -1,7 +1,7 @@
 use crate::client::{ApiState, Client};
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
-use log::info;
+use log::{debug, error};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use strum_macros::IntoStaticStr;
@@ -10,10 +10,11 @@ use url::Url;
 async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
     let r = req.send().await?;
     let st = r.status();
-    info!("{} from {}", st, r.url());
     if st.is_success() || st.is_redirection() {
+        debug!("{} from {}", st, r.url());
         Ok(r.json().await?)
     } else {
+        error!("{} from {}", st, r.url());
         Err(Error::Pixiv(st.as_u16(), r.text().await?))
     }
 }

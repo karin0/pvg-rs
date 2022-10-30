@@ -2,7 +2,7 @@ use crate::endpoint::{ApiEndpoint, Endpoint};
 use crate::error::Result;
 use crate::model::{from_response, Response, User};
 use crate::oauth::{auth, AuthSuccess};
-use log::info;
+use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client as Http, RequestBuilder};
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,10 @@ impl AuthedState {
     pub fn new(res: AuthResult) -> Result<Self> {
         let resp: AuthSuccess = from_response(res.resp)?;
         let resp = resp.response;
+        info!(
+            "authed: {}, {} ({}) in {}",
+            resp.user.id, resp.user.name, resp.user.account, resp.expires_in,
+        );
         Ok(Self {
             access_header: format!("Bearer {}", resp.access_token),
             refresh_token: resp.refresh_token,
@@ -110,7 +114,7 @@ impl<S: ApiState> Client<S> {
     pub async fn raw_auth(&self, refresh_token: &str) -> Result<AuthResult> {
         let now = SystemTime::now();
         let resp = self.do_auth(refresh_token).await?;
-        info!("auth: {:?}", resp);
+        debug!("auth: {:?}", resp);
         Ok(AuthResult { resp, time: now })
     }
 
