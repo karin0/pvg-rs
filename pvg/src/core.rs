@@ -93,8 +93,11 @@ impl Pvg {
                 if e.kind() == io::ErrorKind::NotFound {
                     info!("creating new db file");
                     let lock = std::fs::OpenOptions::new()
+                        .write(true)
                         .create_new(true)
                         .open(&config.db_file)?;
+                    drop(lock);
+                    let lock = std::fs::File::open(&config.db_file)?;
                     lock.try_lock_exclusive()?;
                     (
                         IllustIndex::parse("[]".to_owned(), config.disable_select)?,
