@@ -59,6 +59,7 @@ pub struct Pvg {
     disk_lru: RwLock<DiskLru>,
     lru_limit: Option<u64>,
     upscaler: Option<Upscaler>,
+    update_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -208,6 +209,7 @@ impl Pvg {
             disk_lru: RwLock::new(lru),
             lru_limit,
             upscaler,
+            update_lock: Default::default(),
         })
     }
 
@@ -282,17 +284,39 @@ impl Pvg {
         Ok(!updated)
     }
 
-    async fn _quick_update(&self, stage: usize, restrict: BookmarkRestrict) -> Result<()> {
-        let api = self.api.read().await;
-        let mut r: BookmarkPage = api.user_bookmarks_illust(&self.uid, restrict).await?;
+    async fn auth(&self) -> Result<tokio::sync::RwLockReadGuard<AuthedClient>> {
+        {
+            let mut api = self.api.write().await;
+            api.ensure_authed().await?;
+        }
+        Ok(self.api.read().await)
+    }
+
+    async fn _quick_update(
+        &self,
+        stage: usize,
+        restrict: BookmarkRestrict,
+        pn_limit: u32,
+    ) -> Result<()> {
         let mut pn = 1;
+        if pn > pn_limit {
+            return Ok(());
+        }
+        let mut r: BookmarkPage = self
+            .auth()
+            .await?
+            .user_bookmarks_illust(&self.uid, restrict)
+            .await?;
         info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
         if self._quick_update_with_page(stage, r.illusts)? {
             return Ok(());
         }
         while let Some(u) = r.next_url {
-            r = api.call_url(&u).await?;
             pn += 1;
+            if pn > pn_limit {
+                break;
+            }
+            r = self.auth().await?.call_url(&u).await?;
             info!("page {}: {} illusts", pn, r.illusts.len());
             if self._quick_update_with_page(stage, r.illusts)? {
                 break;
@@ -302,18 +326,21 @@ impl Pvg {
     }
 
     pub async fn quick_update(&self) -> Result<()> {
-        {
+        let _ = self.update_lock.try_lock()?;
+        let empty = {
             let index = self.index.read();
             index.ensure_stage_clean(0)?;
             index.ensure_stage_clean(1)?;
-        }
-        {
-            let mut api = self.api.try_write()?;
-            api.ensure_authed().await?;
-        }
+            index.len() == 0
+        };
+        let limit = if empty {
+            self.conf.first_time_pn_limit.unwrap_or(u32::MAX)
+        } else {
+            u32::MAX
+        };
         let r = try_join!(
-            self._quick_update(0, BookmarkRestrict::Private),
-            self._quick_update(1, BookmarkRestrict::Public)
+            self._quick_update(0, BookmarkRestrict::Private, limit),
+            self._quick_update(1, BookmarkRestrict::Public, limit),
         );
         let mut index = self.index.write();
         if let Err(e) = r {
