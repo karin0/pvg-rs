@@ -76,12 +76,6 @@ pub struct IllustIndex {
     sam_ind: Vec<IllustId>,
 }
 
-impl Default for IllustIndex {
-    fn default() -> Self {
-        Self::parse("[]".to_owned()).unwrap()
-    }
-}
-
 impl Page {
     pub fn new(url: String, dimensions: Option<Dimensions>) -> Result<Self> {
         Ok(Self {
@@ -157,7 +151,7 @@ impl Illust {
 pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
 impl IllustIndex {
-    pub fn parse(s: String) -> serde_json::error::Result<Self> {
+    pub fn parse(s: String, disable_select: bool) -> serde_json::error::Result<Self> {
         let illusts: Vec<Map<String, Value>> = from_str(&s)?;
         let mut ids = Vec::with_capacity(illusts.len());
 
@@ -167,9 +161,11 @@ impl IllustIndex {
             // FIXME: do not unwrap
             let o = Illust::new(data).unwrap();
             ids.push(o.data.id);
-            sam.push_str(&o.intro);
-            for _ in 0..o.intro.len() {
-                sam_ind.push(o.data.id);
+            if !disable_select {
+                sam.push_str(&o.intro);
+                for _ in 0..o.intro.len() {
+                    sam_ind.push(o.data.id);
+                }
             }
             (o.data.id, o)
         }));

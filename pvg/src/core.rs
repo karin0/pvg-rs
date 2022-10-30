@@ -85,7 +85,7 @@ impl Pvg {
                 let mut s = String::new();
                 db.read_to_string(&mut s)?;
                 info!("read {} bytes from {:?}", s.len(), db);
-                let nav = IllustIndex::parse(s)?;
+                let nav = IllustIndex::parse(s, config.disable_select)?;
                 (nav, db)
             }
             Err(e) => {
@@ -95,7 +95,10 @@ impl Pvg {
                         .create_new(true)
                         .open(&config.db_file)?;
                     lock.try_lock_exclusive()?;
-                    (IllustIndex::default(), lock)
+                    (
+                        IllustIndex::parse("[]".to_owned(), config.disable_select)?,
+                        lock,
+                    )
                 } else {
                     return Err(e.into());
                 }
