@@ -145,7 +145,11 @@ async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
-    pretty_env_logger::init_timed();
+    if std::env::var("JOURNAL_STREAM").is_err() {
+        pretty_env_logger::init_timed();
+    } else {
+        pretty_env_logger::init();
+    }
 
     let core = Pvg::new().await?;
     let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
