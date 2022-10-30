@@ -38,4 +38,18 @@ impl DiskLru {
     pub fn contains(&self, key: &str) -> bool {
         self.lru.contains(key)
     }
+
+    pub fn filter<F: Fn(&str) -> bool>(&mut self, f: F) -> Vec<String> {
+        let a = self
+            .lru
+            .iter()
+            .filter(|(k, _)| !f(k))
+            .map(|(k, _)| k.to_owned())
+            .collect();
+        for k in &a {
+            let r = self.lru.pop(k);
+            self.usage -= r.unwrap();
+        }
+        a
+    }
 }

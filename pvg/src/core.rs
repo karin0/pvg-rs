@@ -400,16 +400,28 @@ impl Pvg {
         DownloadingFile::new(tmp_path).await
     }
 
+    async fn disk_remove(&self, file: &str) {
+        let path = self.page_path(file);
+        if let Err(e) = fs::remove_file(&path).await {
+            error!("failed to remove {:?}: {}", path, e);
+        }
+    }
+
+    async fn disk_orphan(&self, file: &str) {
+        let path = self.page_path(file);
+        let dst = self.orphan_path(&file);
+        if let Err(e) = fs::rename(&path, &dst).await {
+            error!("failed to orphan {:?}: {}", path, e);
+        }
+    }
+
     fn disk_evict(&self, limit: u64) -> Option<String> {
         self.disk_lru.write().evict(limit)
     }
 
     async fn _disk_evict_to(&self, limit: u64) {
         while let Some(file) = self.disk_evict(limit) {
-            let path = self.page_path(file);
-            if let Err(e) = fs::remove_file(&path).await {
-                error!("failed to remove {:?}: {}", path, e);
-            }
+            self.disk_remove(&file).await;
         }
     }
 
@@ -427,6 +439,10 @@ impl Pvg {
 
     fn page_path<T: AsRef<Path>>(&self, file: T) -> PathBuf {
         self.conf.pix_dir.join(file)
+    }
+
+    fn orphan_path<T: AsRef<Path>>(&self, file: T) -> PathBuf {
+        self.conf.orphan_dir.join(file)
     }
 
     pub async fn download(
@@ -785,5 +801,39 @@ impl Pvg {
             now2.elapsed().as_millis()
         );
         Ok(r)
+    }
+}
+
+impl Pvg {
+    fn orphan(&self) -> Vec<String> {
+        let index = self.index.read();
+        let s: HashSet<_> = index
+            .iter()
+            .flat_map(|illust| illust.pages.iter())
+            .map(|page| page.source.filename())
+            .collect();
+
+        let mut lru = self.disk_lru.write();
+        lru.filter(|file| s.contains(file))
+    }
+
+    pub async fn remove_orphans(&self) -> usize {
+        let a = self.orphan();
+        let n = a.len();
+        for file in a {
+            self.disk_remove(&file).await;
+        }
+        info!("removed {n} orphans");
+        n
+    }
+
+    pub async fn move_orphans(&self) -> usize {
+        let a = self.orphan();
+        let n = a.len();
+        for file in a {
+            self.disk_orphan(&file).await;
+        }
+        info!("moved {n} orphans");
+        n
     }
 }

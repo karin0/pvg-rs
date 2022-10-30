@@ -99,6 +99,18 @@ async fn clean(app: web::Data<Pvg>) -> io::Result<&'static str> {
     Ok("ok")
 }
 
+#[get("/action/orphan")]
+async fn orphan(app: web::Data<Pvg>) -> impl Responder {
+    let n = app.move_orphans().await;
+    format!("ok {n}")
+}
+
+#[get("/action/remove_orphans")]
+async fn remove_orphans(app: web::Data<Pvg>) -> impl Responder {
+    let n = app.remove_orphans().await;
+    format!("ok {n}")
+}
+
 #[derive(Deserialize)]
 struct UpscaleForm {
     pid: IllustId,
@@ -156,6 +168,8 @@ async fn main() -> Result<()> {
             .service(clean)
             .service(do_upscale)
             .service(index)
+            .service(orphan)
+            .service(remove_orphans)
     })
     .bind(addr)?
     .disable_signals()
