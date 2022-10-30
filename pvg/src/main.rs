@@ -76,15 +76,15 @@ fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
 }
 
 #[get("/action/qupd")]
-async fn quick_update(app: web::Data<Pvg>) -> io::Result<&'static str> {
-    app.quick_update().await.map_err(mapper)?;
-    Ok("ok")
+async fn quick_update(app: web::Data<Pvg>) -> impl Responder {
+    let (n, m) = app.quick_update().await.map_err(mapper)?;
+    io::Result::Ok(format!("ok {n} {m}"))
 }
 
 #[get("/action/download")]
-async fn download_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
-    app.download_all().await.map_err(mapper)?;
-    Ok("ok")
+async fn download_all(app: web::Data<Pvg>) -> impl Responder {
+    let n = app.download_all().await.map_err(mapper)?;
+    io::Result::Ok(format!("ok {n}"))
 }
 
 #[get("/action/measure")]

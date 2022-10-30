@@ -328,7 +328,7 @@ impl Pvg {
         Ok(())
     }
 
-    pub async fn quick_update(&self) -> Result<()> {
+    pub async fn quick_update(&self) -> Result<(usize, usize)> {
         let _ = self.update_lock.try_lock()?;
         let empty = {
             let index = self.index.read();
@@ -356,9 +356,10 @@ impl Pvg {
             return Err(e);
         }
         // commit private first
-        let n = index.commit(0);
-        info!("quick updated {} + {} illusts", index.commit(1), n);
-        Ok(())
+        let n_pri = index.commit(0);
+        let n_pub = index.commit(1);
+        info!("quick updated {} + {} illusts", n_pub, n_pri);
+        Ok((n_pri, n_pub))
     }
 
     pub fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
@@ -582,7 +583,7 @@ impl Pvg {
         r
     }
 
-    pub async fn download_all(&self) -> Result<()> {
+    pub async fn download_all(&self) -> Result<i32> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
@@ -628,7 +629,7 @@ impl Pvg {
         if cnt_fail > 0 {
             bail!("{} downloads failed", cnt_fail);
         }
-        Ok(())
+        Ok(cnt)
     }
 }
 
