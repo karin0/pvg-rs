@@ -870,7 +870,10 @@ impl Pvg {
     async fn worker_body(&self) -> Result<()> {
         let (n, m) = self.quick_update().await?;
         if n > 0 || m > 0 {
-            self.download_all().await?;
+            if let Err(e) = self.download_all().await {
+                error!("download_all: {}", e);
+            }
+            self.move_orphans().await;
         }
         Ok(())
     }
@@ -879,6 +882,7 @@ impl Pvg {
         if self.conf.worker_delay_secs > 0 {
             let d = std::time::Duration::from_secs(self.conf.worker_delay_secs as u64);
             tokio::spawn(async move {
+                info!("worker started with delay {:?}", d);
                 loop {
                     if let Err(e) = self.worker_body().await {
                         error!("worker: {}", e);
@@ -890,13 +894,6 @@ impl Pvg {
     }
 
     pub async fn qudo(&self) -> Result<()> {
-        let (n, m) = self.quick_update().await?;
-        if n > 0 || m > 0 {
-            if let Err(e) = self.download_all().await {
-                error!("download_all: {}", e);
-            }
-        }
-        self.move_orphans().await;
-        Ok(())
+        self.worker_body().await
     }
 }
