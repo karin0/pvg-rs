@@ -111,6 +111,12 @@ async fn remove_orphans(app: web::Data<Pvg>) -> impl Responder {
     format!("ok {n}")
 }
 
+#[get("/action/qudo")]
+async fn qudo(app: web::Data<Pvg>) -> impl Responder {
+    app.qudo().await.map_err(mapper)?;
+    io::Result::Ok("ok")
+}
+
 #[derive(Deserialize)]
 struct UpscaleForm {
     pid: IllustId,
@@ -174,6 +180,7 @@ async fn main() -> Result<()> {
             .service(index)
             .service(orphan)
             .service(remove_orphans)
+            .service(qudo)
     })
     .bind(addr)?
     .disable_signals()

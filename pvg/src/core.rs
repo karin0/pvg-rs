@@ -853,7 +853,7 @@ impl Pvg {
         for file in a {
             self.disk_remove(&file).await;
         }
-        info!("removed {n} orphans");
+        warn!("removed {n} orphans");
         n
     }
 
@@ -887,5 +887,16 @@ impl Pvg {
                 }
             });
         }
+    }
+
+    pub async fn qudo(&self) -> Result<()> {
+        let (n, m) = self.quick_update().await?;
+        if n > 0 || m > 0 {
+            if let Err(e) = self.download_all().await {
+                error!("download_all: {}", e);
+            }
+        }
+        self.move_orphans().await;
+        Ok(())
     }
 }
