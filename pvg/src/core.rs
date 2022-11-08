@@ -479,7 +479,7 @@ impl Pvg {
         src: &str,
         path: PathBuf,
     ) -> Result<impl Stream<Item = Result<Bytes>>> {
-        info!("downloading {}", src);
+        debug!("downloading {}", src);
         let mut tmp = self.open_temp(&path).await?;
         let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
         let t = Instant::now();
@@ -499,7 +499,7 @@ impl Pvg {
             Ok(r) => r,
         };
         let size = remote.content_length();
-        info!(
+        debug!(
             "{:?}: connection established in {:.3} secs, {:?} B",
             path,
             t.elapsed().as_secs_f32(),

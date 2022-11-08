@@ -69,7 +69,7 @@ impl DownloadingFile {
                 bail!("expected {} bytes, written {}", expected, size);
             }
         } else {
-            warn!("unknown size, written {}", self.size);
+            debug!("unknown size, written {}", self.size);
         }
         Ok(self.do_commit(path).await?)
     }
@@ -136,7 +136,7 @@ impl DownloadingStream {
                 Some((Err(e.into()), None))
             }
             Ok(None) => {
-                info!("{:?}: remote streaming done", self.path);
+                debug!("{:?}: remote streaming done", self.path);
                 if let Err(e) = self.tx.send(None) {
                     bug!("{:?}: done send error: {}", self.path, e);
                 }
