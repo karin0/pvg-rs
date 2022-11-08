@@ -7,3 +7,8 @@ members = [
 
 [profile.release]
 strip = true
+
+[profile.debuginfo]
+inherits = "release"
+debug = true
+strip = false
