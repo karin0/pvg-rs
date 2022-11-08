@@ -407,9 +407,11 @@ impl Pvg {
     }
 
     pub async fn upscale(&self, iid: IllustId, pn: PageNum, scale: u8) -> Result<PathBuf> {
-        let index = self.index.read();
-        let src = &index.get_page(iid, pn).context("no such page")?.source;
-        let file = src.filename();
+        let file = {
+            let index = self.index.read();
+            let src = &index.get_page(iid, pn).context("no such page")?.source;
+            src.filename().to_owned()
+        };
         let out_file = format!("{}_{}x.png", file.replace('.', "_"), scale);
         let out_path = self.conf.upscale_dir.join(&out_file);
         if fs::metadata(&out_path).await.is_ok() {
@@ -438,7 +440,7 @@ impl Pvg {
 
     async fn disk_orphan(&self, file: &str) {
         let path = self.page_path(file);
-        let dst = self.orphan_path(&file);
+        let dst = self.orphan_path(file);
         if let Err(e) = fs::rename(&path, &dst).await {
             error!("failed to orphan {:?}: {}", path, e);
         }
