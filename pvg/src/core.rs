@@ -851,6 +851,7 @@ impl Pvg {
         let a = self.orphan();
         let n = a.len();
         for file in a {
+            warn!("removing orphan: {file}");
             self.disk_remove(&file).await;
         }
         warn!("removed {n} orphans");
@@ -861,6 +862,9 @@ impl Pvg {
         let a = self.orphan();
         let n = a.len();
         for file in a {
+            if !self.is_worker() {
+                warn!("moving orphan: {file}");
+            }
             self.disk_orphan(&file).await;
         }
         info!("moved {n} orphans");
