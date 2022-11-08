@@ -13,7 +13,7 @@ log = "0"
 pretty_env_logger = "0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-actix-files = { version = "0", features = ["experimental-io-uring"] }
+actix-files = "0"
 parking_lot = "0"
 actix-cors = "0"
 ctrlc = { version = "3", features = ["termination"] }
@@ -26,3 +26,7 @@ itertools = "0"
 lru = "0"
 
 pixiv = { path = "../pixiv" }
+
+[features]
+default = [ "io-uring" ]
+io-uring = [ "actix-files/experimental-io-uring" ]
