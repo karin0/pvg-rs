@@ -1,0 +1,47 @@
+name: Build
+on: [push]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          default: true
+          components: clippy
+
+      - name: Check
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --release --no-default-features
+
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --no-default-features
+
+      - uses: msys2/setup-msys2@v2
+
+      - name: Compress Binary
+        shell: msys2 {0}
+        run: |
+          FILE=pvg-${GITHUB_SHA::6}-win.xz
+          xz -cv target/release/pvg.exe > $FILE
+          echo "FILE=$FILE" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.FILE }}
+          path: ${{ env.FILE }}
