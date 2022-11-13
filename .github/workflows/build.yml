@@ -44,7 +44,8 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - run: cargo install cross
+      # avoiding conflict with cached one
+      - run: cargo install cross || true
         if: matrix.target != 'x86_64-unknown-linux-gnu'
 
       - name: Build ${{ matrix.target }}
@@ -93,7 +94,6 @@ jobs:
           toolchain: stable
           profile: minimal
           default: true
-          components: clippy
 
       - uses: actions/cache@v3
         with:
