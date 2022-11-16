@@ -100,7 +100,7 @@ jobs:
           set -e
           cargo update
           cargo build --release --no-default-features
-          FILE=pvg-${GITHUB_SHA::7}-$target.xz
+          FILE=pvg-${GITHUB_SHA::7}-${{ matrix.target }}.xz
           echo "FILE=$FILE" >> $GITHUB_ENV
           xz -cv target/release/pvg.exe > $FILE
 
