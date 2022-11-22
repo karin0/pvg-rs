@@ -10,7 +10,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", 
 actix-web = "4"
 anyhow = { version = "1", features = ["backtrace"] }
 log = "0"
-pretty_env_logger = "0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 actix-files = "0"
@@ -24,6 +23,7 @@ image = "0"
 suffix = "1"
 itertools = "0"
 lru = "0"
+pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 
 pixiv = { path = "../pixiv" }
 
