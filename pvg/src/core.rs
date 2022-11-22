@@ -779,12 +779,15 @@ struct SelectResponse<'a> {
 }
 
 impl Pvg {
-    pub fn select(&self, filters: &[String]) -> serde_json::Result<String> {
+    pub fn select(&self, mut filters: Vec<String>) -> serde_json::Result<String> {
         // TODO: do this all sync can block for long.
         let now = Instant::now();
+        if self.conf.safe_mode {
+            filters.push("$s2".to_owned());
+        }
         let index = self.index.read();
         let r: Vec<SelectedIllust> = index
-            .select(filters)
+            .select(&filters)
             .rev()
             .map(|illust| {
                 let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();

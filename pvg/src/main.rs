@@ -71,7 +71,7 @@ async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl 
         .into_iter()
         .map(|s| s.to_lowercase())
         .collect();
-    let r = app.select(&filters).map_err(mapper)?;
+    let r = app.select(filters).map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
 
