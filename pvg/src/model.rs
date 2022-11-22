@@ -92,6 +92,7 @@ fn make_intro(data: &api::Illust) -> String {
         s.push('\\');
         s.push_str(&t.name);
     }
+    s = s.to_lowercase();
     s.push_str("\\$s");
     s.push_str(&data.sanity_level.to_string());
     s.push_str("\\$x");
@@ -106,6 +107,9 @@ fn make_intro(data: &api::Illust) -> String {
     }
     if data.width >= data.height {
         s.push_str("\\$w");
+    }
+    if data.width >= data.height || data.page_count > 1 {
+        s.push_str("\\$l");
     }
     if data.width <= data.height {
         s.push_str("\\$t");

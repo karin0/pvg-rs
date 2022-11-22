@@ -65,7 +65,13 @@ struct SelectPayload {
 
 #[post("/select")]
 async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl Responder {
-    let r = app.select(&filters.filters).map_err(mapper)?;
+    let filters: Vec<_> = filters
+        .into_inner()
+        .filters
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let r = app.select(&filters).map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
 
