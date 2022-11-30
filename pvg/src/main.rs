@@ -93,6 +93,7 @@ async fn download_all(app: web::Data<Pvg>) -> impl Responder {
     io::Result::Ok(format!("ok {n}"))
 }
 
+#[cfg(feature = "image")]
 #[get("/action/measure")]
 async fn measure_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
     app.measure_all().await.map_err(mapper)?;
@@ -148,6 +149,7 @@ async fn do_upscale(app: web::Data<Pvg>, form: web::Form<UpscaleForm>) -> io::Re
 
 #[get("/")]
 async fn index(req: HttpRequest) -> impl Responder {
+    #[allow(clippy::explicit_auto_deref)]
     let index: &'static Path = *req.app_data().unwrap();
     NamedFile::open_async(index).await
 }
@@ -171,7 +173,7 @@ async fn main() -> Result<()> {
     let pvg = data.clone().into_inner();
     let server = HttpServer::new(move || {
         let statics = actix_files::Files::new("/s", static_dir);
-        App::new()
+        let app = App::new()
             .wrap(Cors::permissive())
             .app_data(data.clone())
             .app_data(static_index)
@@ -180,13 +182,18 @@ async fn main() -> Result<()> {
             .service(select)
             .service(quick_update)
             .service(download_all)
-            .service(measure_all)
             .service(clean)
             .service(do_upscale)
             .service(index)
             .service(orphan)
             .service(remove_orphans)
-            .service(qudo)
+            .service(qudo);
+        #[cfg(feature = "image")]
+        return app.service(measure_all);
+
+        #[cfg(not(feature = "image"))]
+        #[allow(clippy::let_and_return)]
+        app
     })
     .bind(addr)?
     .disable_signals()

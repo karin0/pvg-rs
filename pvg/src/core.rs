@@ -2,21 +2,19 @@ use crate::bug;
 use crate::config::{read_config, Config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
-use crate::model::{DimCache, Dimensions, IllustIndex};
+use crate::model::{DimCache, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
-use image::GenericImageView;
 use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use pixiv::aapi::BookmarkRestrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -28,6 +26,13 @@ use std::time::SystemTime;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio::{fs, try_join};
+
+#[cfg(feature = "image")]
+use crate::model::Dimensions;
+#[cfg(feature = "image")]
+use image::GenericImageView;
+#[cfg(feature = "image")]
+use rayon::prelude::*;
 
 #[derive(Deserialize, Default)]
 struct LoadedCache {
@@ -664,14 +669,17 @@ impl Pvg {
     }
 }
 
+#[cfg(feature = "image")]
 type MeasureQueue = (Vec<(IllustId, Vec<(PageNum, String)>)>, usize);
 
+#[cfg(feature = "image")]
 fn measure_file(path: &Path) -> Result<Dimensions> {
     let img = image::open(path)?;
     let (w, h) = img.dimensions();
     Ok(Dimensions(w.try_into()?, h.try_into()?))
 }
 
+#[cfg(feature = "image")]
 impl Pvg {
     fn _make_measure_queue(&self) -> MeasureQueue {
         let mut vec = vec![];
