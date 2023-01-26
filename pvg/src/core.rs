@@ -222,7 +222,7 @@ impl Pvg {
         })
     }
 
-    fn is_worker(&self) -> bool {
+    pub fn is_worker(&self) -> bool {
         self.conf.worker_delay_secs > 0
     }
 
@@ -342,24 +342,7 @@ impl Pvg {
         Ok(())
     }
 
-    fn commit_stage(
-        &self,
-        index: &mut RwLockWriteGuard<IllustIndex>,
-        stage: usize,
-        name: &'static str,
-    ) -> usize {
-        if self.is_worker() {
-            let a = index.peek(stage);
-            if !a.is_empty() {
-                let n = a.len();
-                let s = a.iter().map(|i| i.to_string()).join(", ");
-                info!("{name}: {n} illusts: {s}");
-            }
-        }
-        index.commit(stage)
-    }
-
-    pub async fn quick_update(&self) -> Result<(usize, usize)> {
+    async fn quick_update_atomic(&self) -> Result<RwLockWriteGuard<IllustIndex>> {
         let _ = self.update_lock.try_lock()?;
         let empty = {
             let index = self.index.read();
@@ -386,13 +369,42 @@ impl Pvg {
             );
             return Err(e);
         }
-        // commit private first
-        let n_pri = self.commit_stage(&mut index, 0, "private");
-        let n_pub = self.commit_stage(&mut index, 1, "public");
-        if !self.is_worker() {
-            info!("quick updated {} + {} illusts", n_pub, n_pri);
+        Ok(index)
+    }
+
+    fn commit_stage_worker(
+        &self,
+        index: &mut RwLockWriteGuard<IllustIndex>,
+        stage: usize,
+        name: &'static str,
+        res: &mut Vec<IllustId>,
+    ) {
+        let a = index.peek(stage);
+        if !a.is_empty() {
+            res.extend(a);
+            let n = a.len();
+            let s = a.iter().map(|i| i.to_string()).join(", ");
+            info!("{name}: {n} illusts: {s}");
         }
+        index.commit(stage);
+    }
+
+    pub async fn quick_update(&self) -> Result<(usize, usize)> {
+        let mut index = self.quick_update_atomic().await?;
+        // commit private first
+        index.commit(0);
+        let n_pri = index.commit(0);
+        let n_pub = index.commit(1);
+        info!("quick updated {} + {} illusts", n_pub, n_pri);
         Ok((n_pri, n_pub))
+    }
+
+    async fn quick_update_worker(&self) -> Result<Vec<IllustId>> {
+        let mut ids = Vec::new();
+        let mut index = self.quick_update_atomic().await?;
+        self.commit_stage_worker(&mut index, 0, "private", &mut ids);
+        self.commit_stage_worker(&mut index, 1, "public", &mut ids);
+        Ok(ids)
     }
 
     pub fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
@@ -589,7 +601,7 @@ impl Pvg {
         (path, r)
     }
 
-    fn _make_download_queue(&self) -> Vec<(String, PathBuf)> {
+    fn make_download_queue(&self) -> Vec<(String, PathBuf)> {
         let not_found = self.not_found.lock();
         let disk = self.disk_lru.read();
         let mut cnt_404 = 0;
@@ -618,15 +630,36 @@ impl Pvg {
         r
     }
 
+    fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(String, PathBuf)> {
+        let index = self.index.read();
+        ids.iter()
+            .flat_map(|iid| index.map[iid].pages.iter())
+            .map(|page| {
+                (
+                    page.source.url.clone(),
+                    self.page_path(page.source.filename()),
+                )
+            })
+            .collect()
+    }
+
     pub async fn download_all(&self) -> Result<i32> {
+        let _ = self.download_all_lock.try_lock()?;
+        // FIXME: generate the whole queue in sync for now to avoid the use of async locks.
+        let q = self.make_download_queue();
+        self._download_all(q).await
+    }
+
+    async fn download_all_worker(&self, ids: &[IllustId]) -> Result<i32> {
+        let _ = self.download_all_lock.try_lock()?;
+        let q = self.make_download_queue_from(ids);
+        self._download_all(q).await
+    }
+
+    async fn _download_all(&self, q: Vec<(String, PathBuf)>) -> Result<i32> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
-        // FIXME: generate the whole queue in sync for now to avoid the use of async locks.
-        let _ = self.download_all_lock.try_lock()?;
-        let t = Instant::now();
-        let q = self._make_download_queue();
-        warn!("download_all: blocked for {} ms", t.elapsed().as_millis());
         info!("{} pages to download", q.len());
         let mut futs = q
             .into_iter()
@@ -885,28 +918,28 @@ impl Pvg {
     }
 
     async fn worker_body(&self) -> Result<()> {
-        let (n, m) = self.quick_update().await?;
-        if n > 0 || m > 0 {
-            if let Err(e) = self.download_all().await {
-                error!("download_all: {}", e);
+        let ids = self.quick_update_worker().await?;
+        if !ids.is_empty() {
+            if let Err(e) = self.download_all_worker(&ids).await {
+                error!("download_all_worker: {}", e);
             }
             self.move_orphans().await;
         }
         Ok(())
     }
 
-    pub fn worker_start(self: Arc<Self>) {
+    // As a worker, we simply poll updates and download them.
+    // Disk states should be never checked in worker mode, as the user can move any downloaded stuff away.
+    pub async fn worker_start(self) {
         if self.conf.worker_delay_secs > 0 {
             let d = std::time::Duration::from_secs(self.conf.worker_delay_secs as u64);
-            tokio::spawn(async move {
-                info!("worker started with delay {:?}", d);
-                loop {
-                    if let Err(e) = self.worker_body().await {
-                        error!("worker: {}", e);
-                    }
-                    tokio::time::sleep(d).await;
+            info!("worker started with delay {:?}", d);
+            loop {
+                if let Err(e) = self.worker_body().await {
+                    error!("worker: {}", e);
                 }
-            });
+                tokio::time::sleep(d).await;
+            }
         }
     }
 

@@ -58,6 +58,7 @@ pub struct Illust {
     raw_data: Map<String, Value>,
     pub(crate) pages: Vec<Page>,
     intro: String,
+    deleted: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -149,6 +150,7 @@ impl Illust {
             raw_data,
             pages,
             intro,
+            deleted: false,
         })
     }
 }
@@ -206,7 +208,7 @@ impl IllustIndex {
             if let Some(i) = self.map.get_mut(iid) {
                 cnt += 1;
                 let pc = i.data.page_count as usize;
-                if (pc as usize - 1) * 2 == a.len() {
+                if (pc - 1) * 2 == a.len() {
                     for p in 1..pc {
                         let w = a[(p - 1) << 1];
                         let h = a[(p - 1) << 1 | 1];
@@ -273,17 +275,28 @@ impl IllustIndex {
     }
 
     pub fn stage(&mut self, stage: usize, illust: Map<String, Value>) -> Result<bool> {
-        let illust = Illust::new(illust)?;
+        let mut illust = Illust::new(illust)?;
         let id = illust.data.id;
         let stage = &mut self.stages[stage];
         if !illust.data.visible {
-            if let Some(old) = self.map.get(&id) {
-                warn!(
-                    "{} ({} - {}) is deleted from upstream, which has luckily been indexed.",
-                    id, old.data.title, old.data.user.name
-                );
+            if let Some(old) = self.map.get_mut(&id) {
+                if !old.deleted {
+                    old.deleted = true;
+                    if old.data.visible {
+                        warn!(
+                            "{} ({} - {}) is deleted from upstream, which has luckily been indexed.",
+                            id, old.data.title, old.data.user.name
+                        );
+                    } else {
+                        warn!(
+                            "{} ({} - {}) is deleted from upstream, which sadly hadn't been indexed.",
+                            id, old.data.title, old.data.user.name
+                        );
+                    }
+                }
                 return Ok(false);
             }
+            illust.deleted = true;
             warn!(
                 "{} ({} - {}) is deleted from upstream, which sadly hasn't been indexed.",
                 id, illust.data.title, illust.data.user.name

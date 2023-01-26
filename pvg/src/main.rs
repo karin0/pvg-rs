@@ -166,6 +166,11 @@ async fn main() -> Result<()> {
     }
 
     let core = Pvg::new().await?;
+    if core.is_worker() {
+        core.worker_start().await;
+        unreachable!();
+    }
+
     let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
     let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
     let addr = core.conf.addr;
@@ -206,8 +211,6 @@ async fn main() -> Result<()> {
         info!("open via http://{}", addr);
     }
     let handle = server.handle();
-    pvg.clone().worker_start();
-
     let (tx, mut rx) = oneshot::channel();
     let mut tx = Some(tx);
     ctrlc::set_handler(move || match tx.take() {
