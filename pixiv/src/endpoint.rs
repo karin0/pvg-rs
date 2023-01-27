@@ -48,7 +48,7 @@ impl ApiEndpoint {
     pub fn with_hosts(app_host: Option<&str>, oauth_host: Option<&str>) -> Result<Self> {
         let app_host = app_host.unwrap_or("https://app-api.pixiv.net");
         let oauth_host = oauth_host.unwrap_or("https://oauth.secure.pixiv.net");
-        let appv1 = Version::new(format!("{}/v1", app_host));
+        let appv1 = Version::new(format!("{app_host}/v1"));
         // let appv2 = Version::new(format!("{}/v2", app_host));
         let oauth = Version::new(oauth_host);
         Ok(Self {
