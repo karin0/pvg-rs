@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::fmt::Debug;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 #[macro_use]
@@ -165,10 +166,33 @@ async fn main() -> Result<()> {
         pretty_env_logger::init_timed();
     }
 
+    let (tx, rx) = oneshot::channel();
+    let mut tx = Some(tx);
+    ctrlc::set_handler(move || match tx.take() {
+        Some(tx) => {
+            if tx.send(()).is_err() {
+                error!("failed to invoke shutdown");
+            } else {
+                warn!("shutting down");
+            }
+        }
+        None => {
+            warn!("is shutting down");
+        }
+    })?;
     let core = Pvg::new().await?;
     if core.is_worker() {
-        core.worker_start().await;
-        unreachable!();
+        let core = Arc::new(core);
+        let pvg = core.clone();
+        tokio::spawn(async move {
+            pvg.worker_start().await;
+            unreachable!();
+        });
+        if let Err(e) = rx.await {
+            error!("shutdown recv: {}", e);
+        }
+        core.dump().await?;
+        return Ok(());
     }
 
     let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
@@ -211,26 +235,15 @@ async fn main() -> Result<()> {
         info!("open via http://{}", addr);
     }
     let handle = server.handle();
-    let (tx, mut rx) = oneshot::channel();
-    let mut tx = Some(tx);
-    ctrlc::set_handler(move || match tx.take() {
-        Some(tx) => {
-            if tx.send(()).is_err() {
-                error!("failed to invoke shutdown");
-            } else {
-                warn!("shutting down");
-            }
-        }
-        None => {
-            warn!("is shutting down");
-        }
-    })?;
-
     tokio::select! {
         _ = server => {
             error!("server terminated unexpectedly");
         },
-        _ = &mut rx => {}
+        r = rx => {
+            if let Err(e) = r {
+                error!("shutdown recv: {}", e);
+            }
+        }
     }
     pvg.dump().await?;
     info!("shutting down server");

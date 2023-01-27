@@ -930,7 +930,7 @@ impl Pvg {
 
     // As a worker, we simply poll updates and download them.
     // Disk states should be never checked in worker mode, as the user can move any downloaded stuff away.
-    pub async fn worker_start(self) {
+    pub async fn worker_start(&self) {
         if self.conf.worker_delay_secs > 0 {
             let d = std::time::Duration::from_secs(self.conf.worker_delay_secs as u64);
             info!("worker started with delay {:?}", d);
@@ -944,6 +944,15 @@ impl Pvg {
     }
 
     pub async fn qudo(&self) -> Result<()> {
-        self.worker_body().await
+        let (n, m) = self.quick_update().await?;
+        if n > 0 || m > 0 {
+            let r = self.download_all().await;
+            self.move_orphans().await;
+            if let Err(e) = r {
+                error!("download_all: {}", e);
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 }
