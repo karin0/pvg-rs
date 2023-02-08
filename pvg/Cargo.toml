@@ -28,6 +28,5 @@ pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 pixiv = { path = "../pixiv" }
 
 [features]
-default = ["io-uring"]
 io-uring = ["actix-files/experimental-io-uring"]
 image = ["dep:image", "dep:rayon"]
