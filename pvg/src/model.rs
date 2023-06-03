@@ -57,7 +57,7 @@ pub struct Illust {
     pub(crate) data: api::Illust,
     raw_data: Map<String, Value>,
     pub(crate) pages: Vec<Page>,
-    intro: String,
+    pub(crate) intro: String,
     deleted: bool,
 }
 

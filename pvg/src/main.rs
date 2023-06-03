@@ -62,17 +62,21 @@ struct SelectResponse {
 #[derive(Deserialize, Debug)]
 struct SelectPayload {
     filters: Vec<String>,
+    ban_filters: Option<Vec<String>>,
 }
 
 #[post("/select")]
-async fn select(app: web::Data<Pvg>, filters: web::Json<SelectPayload>) -> impl Responder {
-    let filters: Vec<_> = filters
-        .into_inner()
+async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl Responder {
+    let payload = payload.into_inner();
+    let filters: Vec<_> = payload
         .filters
         .into_iter()
         .map(|s| s.to_lowercase())
         .collect();
-    let r = app.select(filters).map_err(mapper)?;
+    let ban_filters: Option<Vec<_>> = payload
+        .ban_filters
+        .map(|v| v.into_iter().map(|s| s.to_lowercase()).collect());
+    let r = app.select(filters, ban_filters).map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
 

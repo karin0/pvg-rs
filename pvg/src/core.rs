@@ -2,7 +2,7 @@ use crate::bug;
 use crate::config::{read_config, Config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
-use crate::model::{DimCache, IllustIndex};
+use crate::model::{DimCache, Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{bail, Context, Result};
@@ -820,15 +820,49 @@ struct SelectResponse<'a> {
 }
 
 impl Pvg {
-    pub fn select(&self, mut filters: Vec<String>) -> serde_json::Result<String> {
-        // TODO: do this all sync can block for long.
-        let now = Instant::now();
+    pub fn select(
+        &self,
+        mut filters: Vec<String>,
+        ban_filters: Option<Vec<String>>,
+    ) -> serde_json::Result<String> {
         if self.conf.safe_mode {
             filters.push("$s2".to_owned());
         }
+
+        let now = Instant::now();
         let index = self.index.read();
-        let r: Vec<SelectedIllust> = index
-            .select(&filters)
+        let it = index.select(&filters);
+        let r = if let Some(bans) = ban_filters {
+            if !bans.is_empty() {
+                self._select(it.filter(|i| !bans.iter().any(|b| i.intro.contains(b))))
+            } else {
+                self._select(it)
+            }
+        } else {
+            self._select(it)
+        };
+
+        let now2 = Instant::now();
+        let t = (now2 - now).as_millis();
+        let n = r.len();
+        let r = serde_json::to_string(&SelectResponse { items: r })?;
+        info!(
+            "{:?}: {} illusts ({:.1} KiB) in {} + {} ms",
+            filters,
+            n,
+            r.len() as f32 / 1024.,
+            t,
+            now2.elapsed().as_millis()
+        );
+        Ok(r)
+    }
+
+    fn _select<'a>(
+        &self,
+        index: impl DoubleEndedIterator<Item = &'a Illust>,
+    ) -> Vec<SelectedIllust<'a>> {
+        // TODO: do this all sync can block for long.
+        index
             .rev()
             .map(|illust| {
                 let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
@@ -863,20 +897,7 @@ impl Pvg {
                     (i.sanity_level >> 1) + i.x_restrict,
                 )
             })
-            .collect();
-        let now2 = Instant::now();
-        let t = (now2 - now).as_millis();
-        let n = r.len();
-        let r = serde_json::to_string(&SelectResponse { items: r })?;
-        info!(
-            "{:?}: {} illusts ({:.1} KiB) in {} + {} ms",
-            filters,
-            n,
-            r.len() as f32 / 1024.,
-            t,
-            now2.elapsed().as_millis()
-        );
-        Ok(r)
+            .collect()
     }
 }
 
