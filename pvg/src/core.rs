@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Semaphore};
-use tokio::time::Instant;
+use tokio::time::{sleep, Duration, Instant};
 use tokio::{fs, try_join};
 
 #[cfg(feature = "image")]
@@ -331,7 +331,21 @@ impl Pvg {
             if pn > pn_limit {
                 break;
             }
-            r = self.auth().await?.call_url(&u).await?;
+            r = loop {
+                match self.auth().await?.call_url(&u).await {
+                    Ok(x) => {
+                        break x;
+                    }
+                    Err(e) => {
+                        if e.to_string().to_ascii_lowercase().contains("rate limit") {
+                            warn!("rate limited, sleeping for 60 secs");
+                            sleep(Duration::from_secs(60)).await;
+                        } else {
+                            bail!(e);
+                        }
+                    }
+                }
+            };
             if !self.is_worker() {
                 info!("page {}: {} illusts", pn, r.illusts.len());
             }
@@ -953,13 +967,13 @@ impl Pvg {
     // Disk states should be never checked in worker mode, as the user can move any downloaded stuff away.
     pub async fn worker_start(&self) {
         if self.conf.worker_delay_secs > 0 {
-            let d = std::time::Duration::from_secs(self.conf.worker_delay_secs as u64);
+            let d = Duration::from_secs(self.conf.worker_delay_secs as u64);
             info!("worker started with delay {:?}", d);
             loop {
                 if let Err(e) = self.worker_body().await {
                     error!("worker: {}", e);
                 }
-                tokio::time::sleep(d).await;
+                sleep(d).await;
             }
         }
     }
