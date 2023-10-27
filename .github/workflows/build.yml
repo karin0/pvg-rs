@@ -1,5 +1,12 @@
 name: Build
-on: [push, workflow_dispatch]
+
+on:
+  release:
+    types: [published] # include pre-releases
+  push:
+    branches: # ignore any tags
+      - '**'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +42,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           path-type: inherit
+          install: ${{ github.event_name == 'release' && 'zip' || 'false' }}
 
       - uses: actions/checkout@v2
 
@@ -77,16 +85,43 @@ jobs:
           target=${{ matrix.target }}
           ${CARGO:=cargo} build --release --target $target
 
+          bin=target/$target/release/pvg
           if [[ $target == *windows* ]]; then
-            ext=.exe
+            bin+=.exe
           fi
-          bin=target/$target/release/pvg$ext
 
           FILE=pvg-${GITHUB_SHA::7}-$target.xz
           xz -cv $bin > $FILE
-          echo "FILE=$FILE" >> $GITHUB_ENV
+          echo "FILE=$FILE" >> "$GITHUB_ENV"
+          echo "BIN_FILE=$bin" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v3
         with:
           name: ${{ env.FILE }}
           path: ${{ env.FILE }}
+
+      - uses: robinraju/release-downloader@v1.8
+        if: ${{ github.event_name == 'release' }}
+        with:
+          repository: karin0/pvg-app
+          latest: true
+          fileName: "pvg-app-*.zip"
+          out-file-path: static
+          extract: true
+
+      - name: Package for Release
+        if: ${{ github.event_name == 'release' }}
+        run: |
+          ZIP_FILE=pvg-${GITHUB_REF##*/}-${{ matrix.target }}.zip
+          mkdir dist
+          mv "$BIN_FILE" static dist/
+          cd dist
+          rm static/*.zip
+          zip -r ../"$ZIP_FILE" *
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - uses: shogo82148/actions-upload-release-asset@v1
+        if: ${{ github.event_name == 'release' }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ env.ZIP_FILE }}
