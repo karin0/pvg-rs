@@ -12,6 +12,10 @@ Explore, filter and download illustrations from your [pixiv](https://www.pixiv.n
 - Access from local machine or network via a responsive [Web UI](https://github.com/karin0/pvg-app)
 - Cross-platform (Windows, Linux, and Android via [Termux](https://termux.com/) are tested)
 
+## Screenshot
+
+![Screenshot](assets/screenshot.jpg)
+
 ## Getting Started
 
 - Download and extract the latest [Release](https://github.com/karin0/pvg-rs/releases) for your platform
