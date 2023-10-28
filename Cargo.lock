@@ -1593,6 +1593,7 @@ dependencies = [
  "serde_json",
  "suffix",
  "tokio",
+ "vergen",
 ]
 
 [[package]]
@@ -2321,6 +2322,17 @@ dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+]
+
+[[package]]
+name = "vergen"
+version = "8.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85e7dc29b3c54a2ea67ef4f953d5ec0c4085035c0ae2d325be1c0d2144bd9f16"
+dependencies = [
+ "anyhow",
+ "rustversion",
+ "time",
 ]
 
 [[package]]

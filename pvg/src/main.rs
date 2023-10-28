@@ -159,6 +159,29 @@ async fn index(req: HttpRequest) -> impl Responder {
     NamedFile::open_async(index).await
 }
 
+#[derive(Debug, Serialize)]
+struct UserResponse<'a> {
+    name: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct EnvResponse<'a> {
+    user: UserResponse<'a>,
+    ver: &'static str,
+}
+
+#[get("/env")]
+async fn get_env(app: web::Data<Pvg>) -> impl Responder {
+    let r = EnvResponse {
+        user: UserResponse {
+            name: &app.conf.username,
+        },
+        ver: env!("VERGEN_GIT_DESCRIBE"),
+    };
+    let r = serde_json::to_string(&r)?;
+    io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
+}
+
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
@@ -220,7 +243,8 @@ async fn main() -> Result<()> {
             .service(index)
             .service(orphan)
             .service(remove_orphans)
-            .service(qudo);
+            .service(qudo)
+            .service(get_env);
         #[cfg(feature = "image")]
         return app.service(measure_all);
 

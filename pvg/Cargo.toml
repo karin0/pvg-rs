@@ -2,6 +2,7 @@
 name = "pvg"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -26,6 +27,9 @@ lru = "0"
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 
 pixiv = { path = "../pixiv" }
+
+[build-dependencies]
+vergen = { version = "8.2.5", features = ["git", "gitcl"] }
 
 [features]
 io-uring = ["actix-files/experimental-io-uring"]
