@@ -21,7 +21,6 @@ use serde_json::Value;
 use std::fmt::Debug;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
 use tokio::sync::oneshot;
 
 #[macro_use]
@@ -207,26 +206,20 @@ async fn main() -> Result<()> {
             warn!("is shutting down");
         }
     })?;
-    let core = Pvg::new().await?;
-    if core.is_worker() {
-        let core = Arc::new(core);
-        let pvg = core.clone();
+    let data = web::Data::new(Pvg::new().await?);
+    let pvg = data.clone().into_inner();
+
+    if pvg.is_worker() {
+        let pvg = pvg.clone();
         tokio::spawn(async move {
             pvg.worker_start().await;
-            unreachable!();
+            error!("worker terminated unexpectedly");
         });
-        if let Err(e) = rx.await {
-            error!("shutdown recv: {}", e);
-        }
-        core.dump().await?;
-        return Ok(());
     }
 
-    let static_dir: &'static Path = Box::leak(core.conf.static_dir.clone().into_boxed_path());
+    let static_dir: &'static Path = Box::leak(pvg.conf.static_dir.clone().into_boxed_path());
     let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
-    let addr = core.conf.addr;
-    let data = web::Data::new(core);
-    let pvg = data.clone().into_inner();
+    let addr = pvg.conf.addr;
     let server = HttpServer::new(move || {
         let statics = actix_files::Files::new("/s", static_dir);
         let app = App::new()
