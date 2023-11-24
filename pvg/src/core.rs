@@ -266,16 +266,38 @@ impl Pvg {
     }
 
     pub async fn dump(&self) -> Result<()> {
-        let (s, dims) = self.dump_index()?;
         let _ = self.disk.lock().await;
-        if let Some(s) = s {
-            fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak")).await?;
-            info!("writing {} bytes", s.len());
-            fs::write(&self.conf.db_file, s).await?;
-            info!("written into {:?}", self.conf.db_file);
-            // TODO: mark index to be clean within the same guard
-        } else {
-            info!("index is clean");
+        let dims;
+        let mut res = Ok(());
+        match self.dump_index() {
+            Ok((s, index_dims)) => {
+                dims = index_dims;
+                if let Some(s) = s {
+                    if let Err(e) =
+                        fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak"))
+                            .await
+                    {
+                        error!("failed to rename old db: {}", e);
+                        res = Err(e.into());
+                    }
+                    info!("writing {} bytes", s.len());
+                    match fs::write(&self.conf.db_file, s).await {
+                        Ok(_) => info!("written into db {:?}", self.conf.db_file),
+                        Err(e) => {
+                            error!("failed to write db {:?}: {}", self.conf.db_file, e);
+                            res = Err(e.into());
+                        }
+                    }
+                    // TODO: mark index to be clean within the same guard
+                } else {
+                    info!("index is clean");
+                }
+            }
+            Err(e) => {
+                error!("failed to dump index: {}", e);
+                dims = Default::default();
+                res = Err(e);
+            }
         }
         let api = self.api.read().await;
         let s = self.dump_cache(dims, &api.state)?;
@@ -283,7 +305,7 @@ impl Pvg {
         info!("cache: writing {} bytes", s.len());
         tokio::fs::write(&self.conf.cache_file, s).await?;
         info!("cache: written into {:?}", self.conf.cache_file);
-        Ok(())
+        res
     }
 
     fn _quick_update_with_page(&self, stage: usize, r: Vec<Map<String, Value>>) -> Result<bool> {
