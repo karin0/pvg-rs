@@ -2,7 +2,7 @@ use crate::endpoint::{ApiEndpoint, Endpoint};
 use crate::error::Result;
 use crate::model::{from_response, Response, User};
 use crate::oauth::{auth, AuthSuccess};
-use log::{debug, info};
+use log::debug;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client as Http, RequestBuilder};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl AuthedState {
     pub fn new(res: AuthResult) -> Result<Self> {
         let resp: AuthSuccess = from_response(res.resp)?;
         let resp = resp.response;
-        info!(
+        debug!(
             "authed: {}, {} ({}) in {}",
             resp.user.id, resp.user.name, resp.user.account, resp.expires_in,
         );
@@ -157,7 +157,6 @@ impl AuthedClient {
 
     pub async fn ensure_authed(&mut self) -> Result<()> {
         if self.state.expired() {
-            info!("refreshing token");
             self.state = self.auth(&self.state.refresh_token).await?;
         }
         Ok(())
