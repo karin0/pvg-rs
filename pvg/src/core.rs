@@ -953,24 +953,26 @@ impl Pvg {
     pub async fn remove_orphans(&self) -> usize {
         let a = self.orphan();
         let n = a.len();
-        for file in a {
-            warn!("removing orphan: {file}");
-            self.disk_remove(&file).await;
+        if n > 0 {
+            for file in a {
+                warn!("removing orphan: {file}");
+                self.disk_remove(&file).await;
+            }
+            warn!("removed {n} orphans");
         }
-        warn!("removed {n} orphans");
         n
     }
 
     pub async fn move_orphans(&self) -> usize {
         let a = self.orphan();
         let n = a.len();
-        for file in a {
-            if !self.is_worker() {
+        if n > 0 {
+            for file in a {
                 warn!("moving orphan: {file}");
+                self.disk_orphan(&file).await;
             }
-            self.disk_orphan(&file).await;
+            info!("moved {n} orphans");
         }
-        info!("moved {n} orphans");
         n
     }
 
