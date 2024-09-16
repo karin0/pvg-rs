@@ -42,6 +42,7 @@ impl Endpoint for SimpleEndpoint {
 pub struct ApiEndpoint {
     pub auth: SimpleEndpoint,
     pub user_bookmarks_illust: SimpleEndpoint,
+    pub illust_follow: SimpleEndpoint,
 }
 
 impl ApiEndpoint {
@@ -49,11 +50,12 @@ impl ApiEndpoint {
         let app_host = app_host.unwrap_or("https://app-api.pixiv.net");
         let oauth_host = oauth_host.unwrap_or("https://oauth.secure.pixiv.net");
         let appv1 = Version::new(format!("{app_host}/v1"));
-        // let appv2 = Version::new(format!("{}/v2", app_host));
+        let appv2 = Version::new(format!("{}/v2", app_host));
         let oauth = Version::new(oauth_host);
         Ok(Self {
             auth: oauth.post("auth/token")?,
             user_bookmarks_illust: appv1.get("user/bookmarks/illust")?,
+            illust_follow: appv2.get("illust/follow")?,
         })
     }
 

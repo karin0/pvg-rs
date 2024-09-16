@@ -21,10 +21,13 @@ async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
 
 #[derive(Copy, Clone, Debug, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
-pub enum BookmarkRestrict {
+pub enum Restrict {
     Public,
     Private,
 }
+
+#[deprecated]
+pub type BookmarkRestrict = Restrict;
 
 impl<S: ApiState> Client<S> {
     fn app(&self, endpoint: &impl Endpoint) -> RequestBuilder {
@@ -38,13 +41,20 @@ impl<S: ApiState> Client<S> {
     pub async fn user_bookmarks_illust<T: DeserializeOwned>(
         &self,
         user_id: &str,
-        restrict: BookmarkRestrict,
+        restrict: Restrict,
     ) -> Result<T> {
         fin(self.app(&self.api.user_bookmarks_illust).query(&[
             ("user_id", user_id),
             ("restrict", restrict.into()),
             ("filter", "for_ios"),
         ]))
+        .await
+    }
+
+    pub async fn illust_follow<T: DeserializeOwned>(&self, restrict: Restrict) -> Result<T> {
+        fin(self
+            .app(&self.api.illust_follow)
+            .query(&[("restrict", Into::<&str>::into(restrict))]))
         .await
     }
 }

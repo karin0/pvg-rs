@@ -57,12 +57,16 @@ pub struct Illust {
     pub visible: bool,
     pub create_date: String,
     pub caption: String,
+    pub is_bookmarked: bool,
     #[serde(rename = "type")]
     pub type_: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct UserBookmarksIllust {
+pub struct IllustPage {
     pub illusts: Vec<Illust>,
     pub next_url: Option<String>,
 }
+
+#[deprecated]
+pub type UserBookmarksIllust = IllustPage;
