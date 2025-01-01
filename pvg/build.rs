@@ -1,9 +1,8 @@
 use std::error::Error;
-use vergen::EmitBuilder;
+use vergen_gitcl::{Emitter, GitclBuilder};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    EmitBuilder::builder()
-        .git_describe(true, true, None)
-        .emit()?;
+    let gitcl = GitclBuilder::default().describe(true, true, None).build()?;
+    Emitter::default().add_instructions(&gitcl)?.emit()?;
     Ok(())
 }

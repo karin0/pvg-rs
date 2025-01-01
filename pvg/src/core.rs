@@ -11,7 +11,7 @@ use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
-use pixiv::aapi::BookmarkRestrict;
+use pixiv::aapi::Restrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
@@ -327,12 +327,7 @@ impl Pvg {
         Ok(self.api.read().await)
     }
 
-    async fn _quick_update(
-        &self,
-        stage: usize,
-        restrict: BookmarkRestrict,
-        pn_limit: u32,
-    ) -> Result<()> {
+    async fn _quick_update(&self, stage: usize, restrict: Restrict, pn_limit: u32) -> Result<()> {
         let mut pn = 1;
         if pn > pn_limit {
             return Ok(());
@@ -392,8 +387,8 @@ impl Pvg {
             u32::MAX
         };
         let r = try_join!(
-            self._quick_update(0, BookmarkRestrict::Private, limit),
-            self._quick_update(1, BookmarkRestrict::Public, limit),
+            self._quick_update(0, Restrict::Private, limit),
+            self._quick_update(1, Restrict::Public, limit),
         );
         let mut index = self.index.write();
         if let Err(e) = r {

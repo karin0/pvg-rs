@@ -1,9 +1,6 @@
 [workspace]
-
-members = [
-    "pvg",
-    "pixiv",
-]
+resolver = "2"
+members = ["pvg", "pixiv"]
 
 [profile.release]
 strip = true

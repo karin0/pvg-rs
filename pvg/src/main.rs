@@ -17,7 +17,6 @@ use actix_web::{
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fmt::Debug;
 use std::io;
 use std::path::Path;
@@ -51,11 +50,6 @@ async fn image(
         },
         _ => Err(io::Error::new(io::ErrorKind::NotFound, "Not found")),
     }
-}
-
-#[derive(Debug, Serialize)]
-struct SelectResponse {
-    items: Vec<Vec<Value>>,
 }
 
 #[derive(Deserialize, Debug)]
