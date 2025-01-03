@@ -23,7 +23,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Semaphore};
 use tokio::time::{sleep, Duration, Instant};
 use tokio::{fs, try_join};
 
@@ -40,6 +40,8 @@ struct LoadedCache {
     dims: Option<Vec<(IllustId, Vec<u32>)>>,
     #[serde(default)]
     not_found: HashSet<PathBuf>,
+    #[serde(default)]
+    worker_to_download: Vec<IllustId>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +49,7 @@ struct SavingCache<'a> {
     token: &'a AuthedState,
     dims: Vec<(IllustId, Vec<u32>)>,
     not_found: &'a HashSet<PathBuf>,
+    worker_to_download: &'a [IllustId],
 }
 
 #[derive(Debug)]
@@ -58,14 +61,15 @@ pub struct Pvg {
     api: tokio::sync::RwLock<AuthedClient>,
     pixiv: DownloadClient,
     uid: String,
-    disk: tokio::sync::Mutex<()>,
-    download_all_lock: tokio::sync::Mutex<()>,
+    disk: TokioMutex<()>,
+    download_all_lock: TokioMutex<()>,
     not_found: Mutex<HashSet<PathBuf>>,
     db_init_size: usize,
     disk_lru: RwLock<DiskLru>,
     lru_limit: Option<u64>,
     upscaler: Option<Upscaler>,
-    update_lock: tokio::sync::Mutex<()>,
+    update_lock: TokioMutex<()>,
+    worker_to_download: TokioMutex<Vec<IllustId>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -121,6 +125,7 @@ impl Pvg {
         );
 
         let not_found;
+        let worker_to_download;
         let api = match std::fs::File::open(&config.cache_file) {
             Ok(mut cache) => {
                 let mut s = String::new();
@@ -133,6 +138,7 @@ impl Pvg {
                     info!("no cached dims");
                 }
                 not_found = cache.not_found;
+                worker_to_download = cache.worker_to_download;
                 if let Some(token) = cache.token {
                     info!(
                         "loaded token: {} {} {}",
@@ -147,7 +153,8 @@ impl Pvg {
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
                     info!("no cache file");
-                    not_found = HashSet::new();
+                    not_found = Default::default();
+                    worker_to_download = Default::default();
                     AuthedClient::new(&config.refresh_token).await?
                 } else {
                     return Err(e.into());
@@ -204,6 +211,14 @@ impl Pvg {
         } else {
             None
         };
+
+        info!(
+            "initialized {} illusts, {} not_founds, {} worker_to_downloads in {} ms",
+            db_init_size,
+            not_found.len(),
+            worker_to_download.len(),
+            t.elapsed().as_millis(),
+        );
         Ok(Pvg {
             conf: config,
             lock,
@@ -219,6 +234,7 @@ impl Pvg {
             lru_limit,
             upscaler,
             update_lock: Default::default(),
+            worker_to_download: TokioMutex::new(worker_to_download),
         })
     }
 
@@ -248,19 +264,24 @@ impl Pvg {
         Ok((db, dims))
     }
 
-    fn dump_cache(&self, dims: DimCache, token: &AuthedState) -> serde_json::Result<String> {
+    async fn dump_cache(&self, dims: DimCache) -> serde_json::Result<String> {
+        let api = self.api.read().await;
+        let worker_to_download = self.worker_to_download.lock().await;
+        let token = &api.state;
         let not_found = self.not_found.lock();
         info!(
-            "cache: {} {}, {} dims, {} not_founds",
+            "cache: {} {}, {} dims, {} not_founds, {} worker_to_downloads",
             token.user.id,
             token.user.name,
             dims.len(),
-            not_found.len()
+            not_found.len(),
+            worker_to_download.len()
         );
         let cache = SavingCache {
             token,
             dims,
             not_found: &not_found,
+            worker_to_download: &worker_to_download,
         };
         serde_json::to_string(&cache)
     }
@@ -299,9 +320,7 @@ impl Pvg {
                 res = Err(e);
             }
         }
-        let api = self.api.read().await;
-        let s = self.dump_cache(dims, &api.state)?;
-        drop(api);
+        let s = self.dump_cache(dims).await?;
         info!("cache: writing {} bytes", s.len());
         tokio::fs::write(&self.conf.cache_file, s).await?;
         info!("cache: written into {:?}", self.conf.cache_file);
@@ -973,12 +992,33 @@ impl Pvg {
 
     async fn worker_body(&self) -> Result<()> {
         let ids = self.quick_update_worker().await?;
-        if !ids.is_empty() {
-            if let Err(e) = self.download_all_worker(&ids).await {
-                error!("download_all_worker: {}", e);
-            }
-            self.move_orphans().await;
+        let mut todo = self.worker_to_download.lock().await;
+        if todo.is_empty() {
+            *todo = ids;
+        } else {
+            warn!("worker: remaining {} illusts to download", todo.len());
+            todo.extend(ids);
         }
+
+        if todo.is_empty() {
+            // Nothing to do.
+            return Ok(());
+        }
+
+        // Allow user interruptions while downloading and resume later.
+        let ids = todo.clone();
+        drop(todo);
+
+        if let Err(e) = self.download_all_worker(&ids).await {
+            error!("download_all_worker: {}", e);
+        }
+
+        // Clear them even if failed to download, as we never retry for now.
+        // Some illusts just keep failing with 404/500.
+        let mut todo = self.worker_to_download.lock().await;
+        todo.clear();
+
+        self.move_orphans().await;
         Ok(())
     }
 
