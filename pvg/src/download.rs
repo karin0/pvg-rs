@@ -84,7 +84,7 @@ impl DownloadingFile {
             if let Some(t) = self.time {
                 let t = t.elapsed().as_secs_f32();
                 let kib = self.size as f32 / 1024.;
-                info!(
+                debug!(
                     "{:?}: committed {:.3} KiB in {:.3} secs ({:.3} KiB/s)",
                     self.path,
                     kib,
@@ -92,7 +92,7 @@ impl DownloadingFile {
                     kib / t
                 );
             } else {
-                info!("{:?}: committed {} B", self.path, self.size);
+                debug!("{:?}: committed {} B", self.path, self.size);
             }
             Ok(self.size as u64)
         }
