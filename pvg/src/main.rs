@@ -163,13 +163,15 @@ struct EnvResponse<'a> {
     ver: &'static str,
 }
 
+const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
+
 #[get("/env")]
 async fn get_env(app: web::Data<Pvg>) -> impl Responder {
     let r = EnvResponse {
         user: UserResponse {
             name: &app.conf.username,
         },
-        ver: env!("VERGEN_GIT_DESCRIBE"),
+        ver: VERSION,
     };
     let r = serde_json::to_string(&r)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
@@ -186,6 +188,7 @@ async fn main() -> Result<()> {
         pretty_env_logger::init_timed();
     }
 
+    info!("pvg {}", VERSION);
     let (tx, rx) = oneshot::channel();
     let mut tx = Some(tx);
     ctrlc::set_handler(move || match tx.take() {

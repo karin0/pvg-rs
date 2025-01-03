@@ -83,7 +83,8 @@ static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
 impl Pvg {
     pub async fn new() -> Result<Pvg> {
         let t = Instant::now();
-        let config = read_config()?;
+        let mut config = read_config()?;
+        let refresh_token = std::mem::replace(&mut config.refresh_token, "*".to_owned());
         info!("config: {:?}", config);
         if let Some(proxy) = &config.proxy {
             std::env::set_var("HTTP_PROXY", proxy);
@@ -147,7 +148,7 @@ impl Pvg {
                     AuthedClient::load(token)
                 } else {
                     info!("no cached token");
-                    AuthedClient::new(&config.refresh_token).await?
+                    AuthedClient::new(&refresh_token).await?
                 }
             }
             Err(e) => {
@@ -155,7 +156,7 @@ impl Pvg {
                     info!("no cache file");
                     not_found = Default::default();
                     worker_to_download = Default::default();
-                    AuthedClient::new(&config.refresh_token).await?
+                    AuthedClient::new(&refresh_token).await?
                 } else {
                     return Err(e.into());
                 }
