@@ -1,5 +1,5 @@
 use crate::config::Config;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs::canonicalize;

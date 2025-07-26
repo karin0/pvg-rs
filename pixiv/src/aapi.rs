@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use strum_macros::IntoStaticStr;
 use url::Url;
 
-async fn fin<'de, T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
+async fn fin<T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
     let r = req.send().await?;
     let st = r.status();
     if st.is_success() || st.is_redirection() {

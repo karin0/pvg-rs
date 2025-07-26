@@ -1,13 +1,13 @@
 use crate::endpoint::{ApiEndpoint, Endpoint};
 use crate::error::Result;
-use crate::model::{from_response, Response, User};
-use crate::oauth::{auth, AuthSuccess};
+use crate::model::{Response, User, from_response};
+use crate::oauth::{AuthSuccess, auth};
 use log::debug;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client as Http, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use serde_with::TimestampMilliSeconds;
+use serde_with::serde_as;
 use std::cmp::max;
 use std::fmt::Debug;
 use std::time::SystemTime;
@@ -114,7 +114,7 @@ impl<S: ApiState> Client<S> {
     pub async fn raw_auth(&self, refresh_token: &str) -> Result<AuthResult> {
         let now = SystemTime::now();
         let resp = self.do_auth(refresh_token).await?;
-        debug!("auth: {:?}", resp);
+        debug!("auth: {resp:?}");
         Ok(AuthResult { resp, time: now })
     }
 

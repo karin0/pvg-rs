@@ -1,11 +1,11 @@
 use crate::bug;
-use crate::config::{read_config, Config};
+use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
 use crate::model::{DimCache, Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
@@ -23,8 +23,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{mpsc, Mutex as TokioMutex, Semaphore};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::sync::{Mutex as TokioMutex, Semaphore, mpsc};
+use tokio::time::{Duration, Instant, sleep};
 use tokio::{fs, try_join};
 
 #[cfg(feature = "image")]
@@ -85,11 +85,13 @@ impl Pvg {
         let t = Instant::now();
         let mut config = read_config()?;
         let refresh_token = std::mem::replace(&mut config.refresh_token, "*".to_owned());
-        info!("config: {:?}", config);
+        info!("config: {config:?}");
         if let Some(proxy) = &config.proxy {
-            std::env::set_var("HTTP_PROXY", proxy);
-            std::env::set_var("HTTPS_PROXY", proxy);
-            std::env::set_var("ALL_PROXY", proxy);
+            unsafe {
+                std::env::set_var("HTTP_PROXY", proxy);
+                std::env::set_var("HTTPS_PROXY", proxy);
+                std::env::set_var("ALL_PROXY", proxy);
+            }
         }
         let (mut nav, lock) = match std::fs::File::open(&config.db_file) {
             Ok(mut db) => {
@@ -192,7 +194,7 @@ impl Pvg {
         let lru_limit = if let Some(limit) = config.cache_limit {
             vec.sort_unstable_by_key(|(_, _, time)| time.to_owned());
             if total_size > limit {
-                warn!("cache size over limit: {} > {}", total_size, limit);
+                warn!("cache size over limit: {total_size} > {limit}");
                 Some(total_size)
             } else {
                 Some(limit)
@@ -299,7 +301,7 @@ impl Pvg {
                         fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak"))
                             .await
                     {
-                        error!("failed to rename old db: {}", e);
+                        error!("failed to rename old db: {e}");
                         res = Err(e.into());
                     }
                     info!("writing {} bytes", s.len());
@@ -316,7 +318,7 @@ impl Pvg {
                 }
             }
             Err(e) => {
-                error!("failed to dump index: {}", e);
+                error!("failed to dump index: {e}");
                 dims = Default::default();
                 res = Err(e);
             }
@@ -446,7 +448,7 @@ impl Pvg {
         index.commit(0);
         let n_pri = index.commit(0);
         let n_pub = index.commit(1);
-        info!("quick updated {} + {} illusts", n_pub, n_pri);
+        info!("quick updated {n_pub} + {n_pri} illusts");
         Ok((n_pri, n_pub))
     }
 
@@ -502,7 +504,7 @@ impl Pvg {
     async fn disk_remove(&self, file: &str) {
         let path = self.page_path(file);
         if let Err(e) = fs::remove_file(&path).await {
-            error!("failed to remove {:?}: {}", path, e);
+            error!("failed to remove {path:?}: {e}");
         }
     }
 
@@ -510,7 +512,7 @@ impl Pvg {
         let path = self.page_path(file);
         let dst = self.orphan_path(file);
         if let Err(e) = fs::rename(&path, &dst).await {
-            error!("failed to orphan {:?}: {}", path, e);
+            error!("failed to orphan {path:?}: {e}");
         }
     }
 
@@ -548,8 +550,8 @@ impl Pvg {
         self: Arc<Self>,
         src: &str,
         path: PathBuf,
-    ) -> Result<impl Stream<Item = Result<Bytes>>> {
-        debug!("downloading {}", src);
+    ) -> Result<impl Stream<Item = Result<Bytes>> + use<>> {
+        debug!("downloading {src}");
         let mut tmp = self.open_temp(&path).await?;
         let perm = DOWNLOAD_SEMA.acquire().await.unwrap();
         let t = Instant::now();
@@ -557,12 +559,12 @@ impl Pvg {
             Err(e) => {
                 tmp.rollback().await;
                 if let pixiv::Error::Pixiv(404, _) = e {
-                    warn!("{:?}: 404, memorized", path);
+                    warn!("{path:?}: 404, memorized");
                     self.not_found
                         .lock()
                         .insert(path.file_name().unwrap().into());
                 } else {
-                    error!("{:?}: request failed: {:?}", path, e);
+                    error!("{path:?}: request failed: {e:?}");
                 }
                 return Err(e.into());
             }
@@ -586,7 +588,7 @@ impl Pvg {
             while let Some(msg) = rx.recv().await {
                 if let Some(b) = msg {
                     if let Err(e) = tmp.write(&b).await {
-                        error!("{:?}: failed to write temp: {}", path, e);
+                        error!("{path:?}: failed to write temp: {e}");
                         drop(perm);
                         tmp.rollback().await;
                         return;
@@ -594,7 +596,7 @@ impl Pvg {
                 } else {
                     drop(perm);
                     match tmp.commit(&path, size).await {
-                        Err(e) => error!("{:?}: failed to save: {}", path, e),
+                        Err(e) => error!("{path:?}: failed to save: {e}"),
                         Ok(size) => {
                             let file = path.file_name().unwrap().to_str().unwrap();
                             {
@@ -606,7 +608,7 @@ impl Pvg {
                     return;
                 }
             }
-            error!("{:?}: remote error", path);
+            error!("{path:?}: remote error");
             drop(perm);
             tmp.rollback().await;
         });
@@ -630,7 +632,7 @@ impl Pvg {
         let r = match self.pixiv.download(url).await {
             Err(e) => {
                 tmp.rollback().await;
-                info!("{:?}: connection failed: {:?}", path, e);
+                info!("{path:?}: connection failed: {e:?}");
                 return Err(e.into());
             }
             Ok(r) => r,
@@ -676,7 +678,7 @@ impl Pvg {
             .map(|(src, file)| (src.url.clone(), self.page_path(file)))
             .collect();
         if cnt_404 > 0 {
-            warn!("{} pages skipped due to 404", cnt_404);
+            warn!("{cnt_404} pages skipped due to 404");
         }
         r
     }
@@ -731,10 +733,10 @@ impl Pvg {
                 }
                 Err(e) => {
                     cnt_fail += 1;
-                    error!("{}/{}: download failed: {}", cnt, n, e);
+                    error!("{cnt}/{n}: download failed: {e}");
                     // handle 404 (and 500 for 85136899?)
                     if let Ok(pixiv::Error::Pixiv(404, _)) = e.downcast::<pixiv::Error>() {
-                        warn!("{:?}: 404!", path);
+                        warn!("{path:?}: 404!");
                         the_404.push(path.file_name().unwrap().into());
                     }
                 }
@@ -1011,7 +1013,7 @@ impl Pvg {
         drop(todo);
 
         if let Err(e) = self.download_all_worker(&ids).await {
-            error!("download_all_worker: {}", e);
+            error!("download_all_worker: {e}");
         }
 
         // Clear them even if failed to download, as we never retry for now.
@@ -1028,10 +1030,10 @@ impl Pvg {
     pub async fn worker_start(&self) {
         if self.conf.worker_delay_secs > 0 {
             let d = Duration::from_secs(self.conf.worker_delay_secs as u64);
-            info!("worker started with delay {:?}", d);
+            info!("worker started with delay {d:?}");
             loop {
                 if let Err(e) = self.worker_body().await {
-                    error!("worker: {}", e);
+                    error!("worker: {e}");
                 }
                 sleep(d).await;
             }
@@ -1044,7 +1046,7 @@ impl Pvg {
             let r = self.download_all().await;
             self.move_orphans().await;
             if let Err(e) = r {
-                error!("download_all: {}", e);
+                error!("download_all: {e}");
                 return Err(e);
             }
         }

@@ -1,7 +1,7 @@
 use crate::{bug, critical};
 use actix_web::web::Bytes;
-use anyhow::{bail, Result};
-use futures::{stream, Stream};
+use anyhow::{Result, bail};
+use futures::{Stream, stream};
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;

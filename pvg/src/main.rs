@@ -9,10 +9,10 @@ mod util;
 use crate::core::Pvg;
 use actix_cors::Cors;
 use actix_files::NamedFile;
-use actix_web::http::{header::ContentType, StatusCode};
+use actix_web::http::{StatusCode, header::ContentType};
 use actix_web::{
-    get, post, web, App, Either, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer,
-    Responder,
+    App, Either, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, Responder, get, post,
+    web,
 };
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
@@ -75,8 +75,8 @@ async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl 
 
 fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
     let e = e.into();
-    error!("mapper: {:?}", e);
-    io::Error::new(io::ErrorKind::Other, e.to_string())
+    error!("mapper: {e:?}");
+    io::Error::other(e.to_string())
 }
 
 #[get("/action/qupd")]
@@ -180,7 +180,9 @@ async fn get_env(app: web::Data<Pvg>) -> impl Responder {
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
     }
     if std::env::var("JOURNAL_STREAM").is_ok() {
         pretty_env_logger::init();
@@ -188,7 +190,7 @@ async fn main() -> Result<()> {
         pretty_env_logger::init_timed();
     }
 
-    info!("pvg {}", VERSION);
+    info!("pvg {VERSION}");
     let (tx, rx) = oneshot::channel();
     let mut tx = Some(tx);
     ctrlc::set_handler(move || match tx.take() {
@@ -245,12 +247,12 @@ async fn main() -> Result<()> {
     .bind(addr)?
     .disable_signals()
     .run();
-    info!("listening on {}", addr);
+    info!("listening on {addr}");
     let ip = addr.ip();
     if ip.is_loopback() || ip.is_unspecified() {
         info!("open via http://localhost:{}", addr.port());
     } else {
-        info!("open via http://{}", addr);
+        info!("open via http://{addr}");
     }
     let handle = server.handle();
     tokio::select! {
@@ -259,7 +261,7 @@ async fn main() -> Result<()> {
         },
         r = rx => {
             if let Err(e) = r {
-                error!("shutdown recv: {}", e);
+                error!("shutdown recv: {e}");
             }
         }
     }

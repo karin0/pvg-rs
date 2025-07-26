@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use itertools::Itertools;
 use pixiv::IllustId;
-use pixiv::{model as api, PageNum};
-use serde::de::value::MapDeserializer;
+use pixiv::{PageNum, model as api};
 use serde::Deserialize;
-use serde_json::{from_str, Map, Value};
+use serde::de::value::MapDeserializer;
+use serde_json::{Map, Value, from_str};
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -223,10 +223,10 @@ impl IllustIndex {
                     );
                 }
             } else {
-                warn!("no such illust: {}", iid);
+                warn!("no such illust: {iid}");
             }
         }
-        info!("loaded {} dimensions from cache", cnt);
+        info!("loaded {cnt} dimensions from cache");
         Ok(())
     }
 
@@ -335,7 +335,7 @@ impl IllustIndex {
                 .iter()
                 .flat_map(|iid| {
                     let n = self.map[iid].intro.len();
-                    std::iter::repeat(*iid).take(n)
+                    std::iter::repeat_n(*iid, n)
                 })
                 .collect_vec();
         }

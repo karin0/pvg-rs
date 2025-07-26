@@ -1,8 +1,8 @@
-use crate::error::Result;
 use crate::Error;
+use crate::error::Result;
 use log::error;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{header, Client, Response};
+use reqwest::{Client, Response, header};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,7 @@ impl DownloadClient {
         if st.is_success() || st.is_redirection() {
             Ok(r)
         } else {
-            error!("download: {:?} from {}", st, url);
+            error!("download: {st:?} from {url}");
             Err(Error::Pixiv(st.as_u16(), r.text().await?))
         }
     }

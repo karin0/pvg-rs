@@ -50,7 +50,7 @@ impl ApiEndpoint {
         let app_host = app_host.unwrap_or("https://app-api.pixiv.net");
         let oauth_host = oauth_host.unwrap_or("https://oauth.secure.pixiv.net");
         let appv1 = Version::new(format!("{app_host}/v1"));
-        let appv2 = Version::new(format!("{}/v2", app_host));
+        let appv2 = Version::new(format!("{app_host}/v2"));
         let oauth = Version::new(oauth_host);
         Ok(Self {
             auth: oauth.post("auth/token")?,
