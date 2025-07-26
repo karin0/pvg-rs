@@ -5,7 +5,7 @@ on:
     types: [published] # include pre-releases
   push:
     branches: # ignore any tags
-      - '**'
+      - "**"
   workflow_dispatch:
 
 env:
@@ -95,7 +95,7 @@ jobs:
           echo "FILE=$FILE" >> "$GITHUB_ENV"
           echo "BIN_FILE=$bin" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.FILE }}
           path: ${{ env.FILE }}
