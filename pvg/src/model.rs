@@ -230,7 +230,8 @@ impl IllustIndex {
         Ok(())
     }
 
-    pub fn dump_dims_cache(&self) -> Vec<(IllustId, Vec<u32>)> {
+    #[allow(dead_code)]
+    fn dump_dims_cache(&self) -> Vec<(IllustId, Vec<u32>)> {
         let mut res = vec![];
         for i in self.iter() {
             if i.data.page_count > 1 {

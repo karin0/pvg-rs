@@ -265,7 +265,7 @@ async fn main() -> Result<()> {
             }
         }
     }
-    pvg.dump().await?;
+    pvg.save().await?;
     info!("shutting down server");
     handle.stop(true).await;
     Ok(())

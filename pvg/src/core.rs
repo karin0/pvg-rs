@@ -2,7 +2,7 @@ use crate::bug;
 use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
-use crate::model::{DimCache, Illust, IllustIndex};
+use crate::model::{Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
@@ -245,7 +245,7 @@ impl Pvg {
         self.conf.worker_delay_secs > 0
     }
 
-    fn dump_index(&self) -> Result<(Option<Vec<u8>>, DimCache)> {
+    fn dump_index(&self) -> Result<Option<Vec<u8>>> {
         let index = self.index.read();
         let db;
         if index.dirty {
@@ -263,53 +263,58 @@ impl Pvg {
                 db = None;
             }
         }
-        let dims = index.dump_dims_cache();
-        Ok((db, dims))
+        Ok(db)
     }
 
-    async fn dump_cache(&self, dims: DimCache) -> serde_json::Result<String> {
+    async fn dump_cache(&self) -> serde_json::Result<String> {
         let api = self.api.read().await;
         let worker_to_download = self.worker_to_download.lock().await;
         let token = &api.state;
         let not_found = self.not_found.lock();
         info!(
-            "cache: {} {}, {} dims, {} not_founds, {} worker_to_downloads",
+            "cache: {} {}, {} not_founds, {} worker_to_downloads",
             token.user.id,
             token.user.name,
-            dims.len(),
             not_found.len(),
             worker_to_download.len()
         );
         let cache = SavingCache {
             token,
-            dims,
+            dims: vec![],
             not_found: &not_found,
             worker_to_download: &worker_to_download,
         };
         serde_json::to_string(&cache)
     }
 
-    pub async fn dump(&self) -> Result<()> {
+    async fn save_cache(&self) -> Result<()> {
+        let s = self.dump_cache().await?;
+        let len = s.len();
+        tokio::fs::write(&self.conf.cache_file, s).await?;
+        info!(
+            "cache: written {} bytes into {:?}",
+            len, self.conf.cache_file
+        );
+        Ok(())
+    }
+
+    async fn save_index(&self) -> Result<()> {
         let _ = self.disk.lock().await;
-        let dims;
-        let mut res = Ok(());
         match self.dump_index() {
-            Ok((s, index_dims)) => {
-                dims = index_dims;
+            Ok(s) => {
                 if let Some(s) = s {
                     if let Err(e) =
                         fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak"))
                             .await
                     {
                         error!("failed to rename old db: {e}");
-                        res = Err(e.into());
                     }
                     info!("writing {} bytes", s.len());
                     match fs::write(&self.conf.db_file, s).await {
                         Ok(_) => info!("written into db {:?}", self.conf.db_file),
                         Err(e) => {
                             error!("failed to write db {:?}: {}", self.conf.db_file, e);
-                            res = Err(e.into());
+                            return Err(e.into());
                         }
                     }
                     // TODO: mark index to be clean within the same guard
@@ -319,15 +324,16 @@ impl Pvg {
             }
             Err(e) => {
                 error!("failed to dump index: {e}");
-                dims = Default::default();
-                res = Err(e);
+                return Err(e);
             }
         }
-        let s = self.dump_cache(dims).await?;
-        info!("cache: writing {} bytes", s.len());
-        tokio::fs::write(&self.conf.cache_file, s).await?;
-        info!("cache: written into {:?}", self.conf.cache_file);
-        res
+        Ok(())
+    }
+
+    pub async fn save(&self) -> Result<()> {
+        self.save_index().await?;
+        self.save_cache().await?;
+        Ok(())
     }
 
     fn _quick_update_with_page(&self, stage: usize, r: Vec<Map<String, Value>>) -> Result<bool> {
@@ -341,7 +347,7 @@ impl Pvg {
         Ok(!updated)
     }
 
-    async fn auth(&self) -> Result<tokio::sync::RwLockReadGuard<AuthedClient>> {
+    async fn auth(&self) -> Result<tokio::sync::RwLockReadGuard<'_, AuthedClient>> {
         {
             let mut api = self.api.write().await;
             api.ensure_authed().await?;
@@ -395,7 +401,7 @@ impl Pvg {
         Ok(())
     }
 
-    async fn quick_update_atomic(&self) -> Result<RwLockWriteGuard<IllustIndex>> {
+    async fn quick_update_atomic(&self) -> Result<RwLockWriteGuard<'_, IllustIndex>> {
         let _ = self.update_lock.try_lock()?;
         let empty = {
             let index = self.index.read();
@@ -443,20 +449,30 @@ impl Pvg {
     }
 
     pub async fn quick_update(&self) -> Result<(usize, usize)> {
-        let mut index = self.quick_update_atomic().await?;
-        // commit private first
-        index.commit(0);
-        let n_pri = index.commit(0);
-        let n_pub = index.commit(1);
+        let (n_pri, n_pub) = {
+            let mut index = self.quick_update_atomic().await?;
+            // commit private first
+            let n_pri = index.commit(0);
+            let n_pub = index.commit(1);
+            (n_pri, n_pub)
+        };
         info!("quick updated {n_pub} + {n_pri} illusts");
+        if n_pub + n_pri > 0 {
+            self.save_index().await?;
+        }
         Ok((n_pri, n_pub))
     }
 
     async fn quick_update_worker(&self) -> Result<Vec<IllustId>> {
         let mut ids = Vec::new();
-        let mut index = self.quick_update_atomic().await?;
-        self.commit_stage_worker(&mut index, 0, "private", &mut ids);
-        self.commit_stage_worker(&mut index, 1, "public", &mut ids);
+        {
+            let mut index = self.quick_update_atomic().await?;
+            self.commit_stage_worker(&mut index, 0, "private", &mut ids);
+            self.commit_stage_worker(&mut index, 1, "public", &mut ids);
+        }
+        if !ids.is_empty() {
+            self.save_index().await?;
+        }
         Ok(ids)
     }
 
@@ -1018,9 +1034,12 @@ impl Pvg {
 
         // Clear them even if failed to download, as we never retry for now.
         // Some illusts just keep failing with 404/500.
-        let mut todo = self.worker_to_download.lock().await;
-        todo.clear();
+        {
+            let mut todo = self.worker_to_download.lock().await;
+            todo.clear();
+        }
 
+        self.save_cache().await?;
         self.move_orphans().await;
         Ok(())
     }
