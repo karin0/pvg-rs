@@ -701,15 +701,35 @@ impl Pvg {
 
     fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(String, PathBuf)> {
         let index = self.index.read();
-        ids.iter()
+        let not_found = self.not_found.lock();
+        let disk = self.disk_lru.read();
+        let mut cnt_404 = 0;
+        let r = ids
+            .iter()
             .flat_map(|iid| index.map[iid].pages.iter())
+            .filter(|page| {
+                let file = page.source.filename();
+                if !disk.contains(file) {
+                    let file: &Path = file.as_ref();
+                    if !not_found.contains(file) {
+                        return true;
+                    } else {
+                        cnt_404 += 1;
+                    }
+                }
+                false
+            })
             .map(|page| {
                 (
                     page.source.url.clone(),
                     self.page_path(page.source.filename()),
                 )
             })
-            .collect()
+            .collect();
+        if cnt_404 > 0 {
+            warn!("{cnt_404} pages skipped due to 404");
+        }
+        r
     }
 
     pub async fn download_all(&self) -> Result<i32> {
