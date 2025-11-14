@@ -61,10 +61,9 @@ pub struct Pvg {
     api: tokio::sync::RwLock<AuthedClient>,
     pixiv: DownloadClient,
     uid: String,
-    disk: TokioMutex<()>,
+    disk_index_size: TokioMutex<usize>,
     download_all_lock: TokioMutex<()>,
     not_found: Mutex<HashSet<PathBuf>>,
-    db_init_size: usize,
     disk_lru: RwLock<DiskLru>,
     lru_limit: Option<u64>,
     upscaler: Option<Upscaler>,
@@ -208,7 +207,7 @@ impl Pvg {
             lru.insert(file, size);
         }
 
-        let db_init_size = nav.len();
+        let index_size = nav.len();
         let upscaler = if let Some(ref path) = config.upscaler_path {
             Some(Upscaler::new(path.clone(), &config).await?)
         } else {
@@ -217,7 +216,7 @@ impl Pvg {
 
         info!(
             "initialized {} illusts, {} not_founds, {} worker_to_downloads in {} ms",
-            db_init_size,
+            index_size,
             not_found.len(),
             worker_to_download.len(),
             t.elapsed().as_millis(),
@@ -230,9 +229,8 @@ impl Pvg {
             uid,
             pixiv: DownloadClient::new(),
             download_all_lock: Default::default(),
-            disk: Default::default(),
             not_found: Mutex::new(not_found),
-            db_init_size,
+            disk_index_size: TokioMutex::new(index_size),
             disk_lru: RwLock::new(lru),
             lru_limit,
             upscaler,
@@ -245,25 +243,21 @@ impl Pvg {
         self.conf.worker_delay_secs > 0
     }
 
-    fn dump_index(&self) -> Result<Option<Vec<u8>>> {
+    fn dump_index(&self, index_size: usize) -> Result<Option<(Vec<u8>, usize)>> {
         let index = self.index.read();
-        let db;
-        if index.dirty {
-            db = Some(index.dump()?);
+        let n = index.len();
+        Ok(if index.dirty {
+            Some((index.dump()?, n))
+        } else if n != index_size {
+            bug!(
+                "DB SIZE CHANGED WITHOUT DIRTY FLAG! {} -> {}",
+                index_size,
+                n
+            );
+            Some((index.dump()?, n))
         } else {
-            let n = index.len();
-            if n != self.db_init_size {
-                bug!(
-                    "DB SIZE CHANGED WITHOUT DIRTY FLAG! {} -> {}",
-                    self.db_init_size,
-                    n
-                );
-                db = Some(index.dump()?);
-            } else {
-                db = None;
-            }
-        }
-        Ok(db)
+            None
+        })
     }
 
     async fn dump_cache(&self) -> serde_json::Result<String> {
@@ -299,19 +293,29 @@ impl Pvg {
     }
 
     async fn save_index(&self) -> Result<()> {
-        let _ = self.disk.lock().await;
-        match self.dump_index() {
+        let mut index_size = self.disk_index_size.lock().await;
+        let old_size = *index_size;
+        match self.dump_index(old_size) {
             Ok(s) => {
-                if let Some(s) = s {
+                if let Some((s, new_size)) = s {
+                    *index_size = new_size;
                     if let Err(e) =
                         fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak"))
                             .await
                     {
                         error!("failed to rename old db: {e}");
                     }
-                    info!("writing {} bytes", s.len());
+                    let n = s.len();
+                    debug!("writing {n} bytes");
                     match fs::write(&self.conf.db_file, s).await {
-                        Ok(_) => info!("written into db {:?}", self.conf.db_file),
+                        Ok(_) => {
+                            let diff = new_size as isize - old_size as isize;
+                            info!(
+                                "written {} MiB into db {:?} ({old_size} -> {new_size}, {diff:+})",
+                                n >> 20,
+                                self.conf.db_file
+                            )
+                        }
                         Err(e) => {
                             error!("failed to write db {:?}: {}", self.conf.db_file, e);
                             return Err(e.into());
