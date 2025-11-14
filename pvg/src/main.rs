@@ -25,6 +25,10 @@ use tokio::sync::oneshot;
 #[macro_use]
 extern crate log;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[get("/img/{iid}/{pn}")]
 async fn image(
     app: web::Data<Pvg>,
@@ -161,24 +165,44 @@ struct UserResponse<'a> {
 struct EnvResponse<'a> {
     user: UserResponse<'a>,
     ver: &'static str,
+    features: Vec<&'static str>,
 }
 
 const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
 
 #[get("/env")]
 async fn get_env(app: web::Data<Pvg>) -> impl Responder {
+    let features = vec![
+        #[cfg(feature = "io-uring")]
+        "io-uring",
+        #[cfg(feature = "image")]
+        "image",
+        #[cfg(feature = "rename2")]
+        "rename2",
+        #[cfg(feature = "compress")]
+        "compress",
+        #[cfg(feature = "dhat-heap")]
+        "dhat-heap",
+    ];
+
     let r = EnvResponse {
         user: UserResponse {
             name: &app.conf.username,
         },
         ver: VERSION,
+        features,
     };
+    info!("env: {:?}", r);
+
     let r = serde_json::to_string(&r)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
 
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     if std::env::var("RUST_LOG").is_err() {
         unsafe {
             std::env::set_var("RUST_LOG", "info");

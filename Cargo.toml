@@ -10,3 +10,4 @@ lto = true
 inherits = "release"
 debug = true
 strip = false
+lto = "thin"
