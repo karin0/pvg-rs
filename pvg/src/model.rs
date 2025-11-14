@@ -3,8 +3,8 @@ use itertools::Itertools;
 use pixiv::IllustId;
 use pixiv::{PageNum, model as api};
 use serde::Deserialize;
-use serde::de::value::MapDeserializer;
-use serde_json::{Map, Value, from_str};
+use serde::de::IntoDeserializer;
+use serde_json::{from_str, value::RawValue};
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -55,7 +55,7 @@ pub struct Page {
 #[derive(Debug, Clone)]
 pub struct Illust {
     pub(crate) data: api::Illust,
-    raw_data: Map<String, Value>,
+    raw_data: Box<RawValue>,
     pub(crate) pages: Vec<Page>,
     pub(crate) intro: String,
     deleted: bool,
@@ -119,9 +119,8 @@ fn make_intro(data: &api::Illust) -> String {
 }
 
 impl Illust {
-    fn new(raw_data: Map<String, Value>) -> Result<Self> {
-        let data = MapDeserializer::new(raw_data.clone().into_iter());
-        let data = api::Illust::deserialize(data)?;
+    fn new(raw_data: Box<RawValue>) -> Result<Self> {
+        let data = api::Illust::deserialize(raw_data.as_ref().into_deserializer())?;
         let pages = if data.page_count == 1 {
             vec![Page::new(
                 data.meta_single_page
@@ -159,7 +158,7 @@ pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
 impl IllustIndex {
     pub fn parse(s: String, disable_select: bool) -> serde_json::error::Result<Self> {
-        let illusts: Vec<Map<String, Value>> = from_str(&s)?;
+        let illusts: Vec<Box<RawValue>> = from_str(&s)?;
         let mut ids = Vec::with_capacity(illusts.len());
 
         let mut sam = String::new();
@@ -275,7 +274,7 @@ impl IllustIndex {
         Ok(())
     }
 
-    pub fn stage(&mut self, stage: usize, illust: Map<String, Value>) -> Result<bool> {
+    pub fn stage(&mut self, stage: usize, illust: Box<RawValue>) -> Result<bool> {
         let mut illust = Illust::new(illust)?;
         let id = illust.data.id;
         let stage = &mut self.stages[stage];

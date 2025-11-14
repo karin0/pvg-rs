@@ -16,7 +16,7 @@ use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::io;
 use std::io::Read;
@@ -74,7 +74,7 @@ pub struct Pvg {
 
 #[derive(Deserialize, Debug)]
 pub struct BookmarkPage {
-    illusts: Vec<Map<String, Value>>,
+    illusts: Vec<Box<RawValue>>,
     next_url: Option<String>,
 }
 
@@ -336,7 +336,7 @@ impl Pvg {
         Ok(())
     }
 
-    fn _quick_update_with_page(&self, stage: usize, r: Vec<Map<String, Value>>) -> Result<bool> {
+    fn _quick_update_with_page(&self, stage: usize, r: Vec<Box<RawValue>>) -> Result<bool> {
         let mut updated = false;
         let mut index = self.index.write();
         for illust in r {
