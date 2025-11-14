@@ -205,7 +205,7 @@ async fn main() -> Result<()> {
 
     if std::env::var("RUST_LOG").is_err() {
         unsafe {
-            std::env::set_var("RUST_LOG", "info");
+            std::env::set_var("RUST_LOG", "warn,pvg=info,pixiv=info");
         }
     }
     if std::env::var("JOURNAL_STREAM").is_ok() {
