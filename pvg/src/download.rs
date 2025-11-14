@@ -71,14 +71,50 @@ impl DownloadingFile {
         } else {
             debug!("unknown size, written {}", self.size);
         }
+
+        #[cfg(not(feature = "rename2"))]
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(f) => drop(f),
+            Err(e) => {
+                self.rollback().await;
+                bail!("failed to open target {:?}: {}", path, e);
+            }
+        }
+
         Ok(self.do_commit(path).await?)
     }
 
     async fn do_commit(mut self, path: &Path) -> io::Result<u64> {
         self.guard.release();
         drop(self.file);
-        if let Err(e) = fs::rename(&self.path, path).await {
+
+        #[cfg(not(feature = "rename2"))]
+        let res = fs::rename(&self.path, path).await;
+
+        #[cfg(feature = "rename2")]
+        let res = {
+            use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
+
+            let res = renameat2(
+                AT_FDCWD,
+                &self.path,
+                AT_FDCWD,
+                path,
+                RenameFlags::RENAME_NOREPLACE,
+            );
+            debug!("{:?} -> {:?}: renameat2 {:?}", self.path, path, res);
+
+            res.map_err(|e| io::Error::from_raw_os_error(e as i32))
+        };
+
+        if let Err(e) = res {
             critical!("{:?}: COMMIT FAILED: {}", self.path, e);
+            Self::do_rollback(&self.path, self.size).await;
             Err(e)
         } else {
             if let Some(t) = self.time {
@@ -101,15 +137,14 @@ impl DownloadingFile {
     pub async fn rollback(mut self) {
         self.guard.release();
         drop(self.file);
-        if let Err(e) = fs::remove_file(&self.path).await {
-            critical!(
-                "{:?}: ROLLBACK FAILED ({} bytes): {}",
-                self.path,
-                self.size,
-                e
-            );
+        Self::do_rollback(&self.path, self.size).await;
+    }
+
+    async fn do_rollback(path: &Path, size: usize) {
+        if let Err(e) = fs::remove_file(&path).await {
+            critical!("{:?}: ROLLBACK FAILED ({} bytes): {}", path, size, e);
         } else {
-            info!("{:?}: rolled back {} bytes", self.path, self.size);
+            warn!("{:?}: rolled back {} bytes", path, size);
         }
     }
 }

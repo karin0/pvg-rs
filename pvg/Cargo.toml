@@ -30,6 +30,7 @@ image = { version = "0", optional = true }
 suffix = "1"
 itertools = "0.14"
 lru = "0.16"
+nix = { version = "0.30", features = ["fs"], optional = true }
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 
 pixiv = { path = "../pixiv" }
@@ -40,3 +41,4 @@ vergen-gitcl = { version = "1", features = ["build"] }
 [features]
 io-uring = ["actix-files/experimental-io-uring"]
 image = ["dep:image", "dep:rayon"]
+rename2 = ["dep:nix"]
