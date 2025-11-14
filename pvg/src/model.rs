@@ -55,6 +55,9 @@ pub struct Page {
 #[derive(Debug, Clone)]
 pub struct Illust {
     pub(crate) data: api::Illust,
+    #[cfg(feature = "compress")]
+    raw_data: Vec<u8>,
+    #[cfg(not(feature = "compress"))]
     raw_data: Box<RawValue>,
     pub(crate) pages: Vec<Page>,
     pub(crate) intro: String,
@@ -119,8 +122,9 @@ fn make_intro(data: &api::Illust) -> String {
 }
 
 impl Illust {
+    #[allow(clippy::boxed_local)]
     fn new(raw_data: Box<RawValue>) -> Result<Self> {
-        let data = api::Illust::deserialize(raw_data.as_ref().into_deserializer())?;
+        let data = api::Illust::deserialize(raw_data.into_deserializer())?;
         let pages = if data.page_count == 1 {
             vec![Page::new(
                 data.meta_single_page
@@ -144,6 +148,22 @@ impl Illust {
             vec
         };
         let intro = make_intro(&data);
+
+        #[cfg(feature = "compress")]
+        let raw_data = {
+            use std::io::Write;
+
+            let raw_data = raw_data.get().as_bytes();
+            let mut encoder = lz4::EncoderBuilder::new()
+                .content_size(raw_data.len() as u64)
+                .build(Vec::new())?;
+            encoder.write_all(raw_data)?;
+            let (mut raw_data, result) = encoder.finish();
+            result?;
+            raw_data.shrink_to_fit();
+            raw_data
+        };
+
         Ok(Self {
             data,
             raw_data,
@@ -152,6 +172,16 @@ impl Illust {
             deleted: false,
         })
     }
+
+    #[cfg(feature = "compress")]
+    fn to_raw_data(&self) -> Result<Box<RawValue>> {
+        use std::io::Read;
+
+        let mut decoder = lz4::Decoder::new(&self.raw_data[..])?;
+        let mut s = String::new();
+        decoder.read_to_string(&mut s)?;
+        Ok(RawValue::from_string(s)?)
+    }
 }
 
 pub type DimCache = Vec<(IllustId, Vec<u32>)>;
@@ -159,6 +189,7 @@ pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 impl IllustIndex {
     pub fn parse(s: String, disable_select: bool) -> serde_json::error::Result<Self> {
         let illusts: Vec<Box<RawValue>> = from_str(&s)?;
+        let size = illusts.iter().map(|i| i.get().len()).sum::<usize>();
         let mut ids = Vec::with_capacity(illusts.len());
 
         let mut sam = String::new();
@@ -175,30 +206,53 @@ impl IllustIndex {
             }
             (o.data.id, o)
         }));
+        debug!("parsed {} illlusts", map.len());
+
+        let n = sam.len();
+        #[cfg(feature = "compress")]
+        {
+            let size2 = map.values().map(|i| i.raw_data.len()).sum::<usize>();
+            info!(
+                "raw: {} MiB -> {} MiB, sam: {n} * 8 = {} MiB",
+                size >> 20,
+                size2 >> 20,
+                n >> 17
+            );
+        }
+
+        #[cfg(not(feature = "compress"))]
+        info!("raw: {} MiB, sam: {n} * 8 = {} MiB", size >> 20, n >> 17);
 
         let mut stages = Vec::with_capacity(2);
         stages.resize_with(2, Default::default);
 
-        let n = sam.len();
-        info!("sam: {n} * 8 = {} MiB", (n * 8) >> 20);
+        let sam = SuffixTable::new(sam);
+        debug!("built suffix table");
 
         Ok(Self {
             map,
             ids,
             dirty: false,
             stages,
-            sam: SuffixTable::new(sam),
+            sam,
             sam_ind,
             disable_select,
         })
     }
 
-    pub fn dump(&self) -> serde_json::error::Result<Vec<u8>> {
+    pub fn dump(&self) -> Result<Vec<u8>> {
         // FIXME: serde can't do async streaming for now.
         info!("collecting {} illlusts", self.len());
+        #[cfg(feature = "compress")]
+        let v = self
+            .iter()
+            .map(|i| i.to_raw_data())
+            .collect::<Result<Vec<_>>>()?;
+
+        #[cfg(not(feature = "compress"))]
         let v = self.iter().map(|i| &i.raw_data).collect::<Vec<_>>();
         info!("dumping {} illlusts", v.len());
-        serde_json::to_vec(&v)
+        Ok(serde_json::to_vec(&v)?)
     }
 
     pub fn load_dims_cache(&mut self, cache: DimCache) -> Result<()> {
