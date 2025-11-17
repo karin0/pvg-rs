@@ -75,7 +75,7 @@ impl Store {
             .collect::<std::io::Result<Vec<_>>>()?;
         let cnt = UNCOMPRESSED_CNT.swap(0, Ordering::Relaxed);
         if cnt > 0 {
-            warn!("found {} uncompressed blobs!", cnt);
+            warn!("found {cnt} uncompressed blobs!");
         }
         let time = DECOMPRESS_COST.swap(0, Ordering::Relaxed);
         info!("decompression took {:?}", Duration::from_nanos(time as u64));
@@ -122,7 +122,7 @@ impl Store {
 
         let tx = self.pool.begin().await?;
         for chunk in all.chunks(BATCH_SIZE) {
-            self._upsert(chunk.iter().cloned()).await?;
+            self._upsert(chunk.iter().copied()).await?;
         }
         Ok(tx.commit().await?)
     }
@@ -165,7 +165,7 @@ impl Store {
             self._overwrite(all).await?;
         } else {
             for chunk in all.chunks(BATCH_SIZE) {
-                self._overwrite(chunk.iter().cloned()).await?;
+                self._overwrite(chunk.iter().copied()).await?;
             }
         }
         Ok(tx.commit().await?)

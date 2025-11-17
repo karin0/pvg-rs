@@ -70,7 +70,7 @@ struct SelectPayload {
 #[post("/select")]
 async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl Responder {
     let payload = payload.into_inner();
-    debug!("select: {:?}", payload);
+    debug!("select: {payload:?}");
     let filters: Vec<_> = payload
         .filters
         .into_iter()
@@ -79,7 +79,7 @@ async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl 
     let ban_filters: Option<Vec<_>> = payload
         .ban_filters
         .map(|v| v.into_iter().map(|s| normalized(&s)).collect());
-    info!("select: {:?} {:?}", filters, ban_filters);
+    info!("select: {filters:?} {ban_filters:?}");
     let r = app.select(filters, ban_filters).await.map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -198,7 +198,7 @@ fn _get_env(app: &Pvg) -> EnvResponse<'_> {
         ver: VERSION,
         features,
     };
-    info!("env: {:?}", r);
+    info!("env: {r:?}");
     r
 }
 

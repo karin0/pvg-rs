@@ -66,7 +66,7 @@ impl DownloadingFile {
             if self.size != expected as usize {
                 let size = self.size;
                 self.rollback().await;
-                bail!("expected {} bytes, written {}", expected, size);
+                bail!("expected {expected} bytes, written {size}");
             }
         } else {
             debug!("unknown size, written {}", self.size);
@@ -109,7 +109,12 @@ impl DownloadingFile {
                 path,
                 RenameFlags::RENAME_NOREPLACE,
             );
-            debug!("{:?} -> {:?}: renameat2 {:?}", self.path, path, res);
+            debug!(
+                "{} -> {}: renameat2 {:?}",
+                self.path.display(),
+                path.display(),
+                res
+            );
 
             res.map_err(|e| io::Error::from_raw_os_error(e as i32))
         };
@@ -123,14 +128,14 @@ impl DownloadingFile {
                 let t = t.elapsed().as_secs_f32();
                 let kib = self.size as f32 / 1024.;
                 debug!(
-                    "{:?}: committed {:.3} KiB in {:.3} secs ({:.3} KiB/s)",
-                    self.path,
+                    "{}: committed {:.3} KiB in {:.3} secs ({:.3} KiB/s)",
+                    self.path.display(),
                     kib,
                     t,
                     kib / t
                 );
             } else {
-                debug!("{:?}: committed {} B", self.path, self.size);
+                debug!("{}: committed {} B", self.path.display(), self.size);
             }
             Ok(self.size as u64)
         }
@@ -146,7 +151,7 @@ impl DownloadingFile {
         if let Err(e) = fs::remove_file(&path).await {
             critical!("{:?}: ROLLBACK FAILED ({} bytes): {}", path, size, e);
         } else {
-            warn!("{:?}: rolled back {} bytes", path, size);
+            warn!("{}: rolled back {size} bytes", path.display());
         }
     }
 }
@@ -169,11 +174,11 @@ impl DownloadingStream {
                 }
             }
             Err(e) => {
-                error!("{:?}: remote streaming failed: {}", self.path, e);
+                error!("{}: remote streaming failed: {}", self.path.display(), e);
                 Some((Err(e.into()), None))
             }
             Ok(None) => {
-                debug!("{:?}: remote streaming done", self.path);
+                debug!("{}: remote streaming done", self.path.display());
                 if let Err(e) = self.tx.send(None) {
                     bug!("{:?}: done send error: {}", self.path, e);
                 }

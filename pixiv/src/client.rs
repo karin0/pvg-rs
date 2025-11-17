@@ -59,11 +59,12 @@ impl AuthedState {
         Ok(Self {
             access_header: format!("Bearer {}", resp.access_token),
             refresh_token: resp.refresh_token,
-            expires_at: res.time + Duration::from_secs(max(0, resp.expires_in - 30) as u64),
+            expires_at: res.time + Duration::from_secs(u64::from(max(0, resp.expires_in - 30))),
             user: resp.user,
         })
     }
 
+    #[must_use] 
     pub fn expired(&self) -> bool {
         SystemTime::now() > self.expires_at
     }
@@ -131,10 +132,12 @@ impl Default for GuestClient {
 }
 
 impl GuestClient {
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use] 
     pub fn into_authed(self, token: AuthedState) -> AuthedClient {
         Client {
             http: self.http,
@@ -151,6 +154,7 @@ impl AuthedClient {
         Ok(r.into_authed(s))
     }
 
+    #[must_use] 
     pub fn load(state: AuthedState) -> Self {
         Self::make(state)
     }

@@ -46,23 +46,19 @@ pub struct Config {
 fn ensure_dir(dir: &Path) {
     match fs::metadata(dir) {
         Ok(meta) => {
-            if !meta.is_dir() {
-                panic!("{} is not a directory", dir.display());
-            }
+            assert!(meta.is_dir(), "{} is not a directory", dir.display());
         }
         Err(_) => {
             fs::create_dir(dir).unwrap();
         }
-    };
+    }
 }
 
 fn ensure_empty_dir(dir: PathBuf) -> PathBuf {
     if let Ok(meta) = fs::metadata(&dir) {
-        if !meta.is_dir() {
-            panic!("{} is not a directory", dir.display());
-        }
+        assert!(meta.is_dir(), "{} is not a directory", dir.display());
         fs::remove_dir_all(&dir).unwrap();
-    };
+    }
     fs::create_dir(&dir).unwrap();
     dir
 }
