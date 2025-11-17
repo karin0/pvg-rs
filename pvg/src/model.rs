@@ -1,14 +1,19 @@
+use crate::critical;
+use crate::store::Store;
+use crate::util::normalized;
 use anyhow::{Context, Result, bail};
 use itertools::Itertools;
 use pixiv::IllustId;
 use pixiv::{PageNum, model as api};
 use serde::Deserialize;
-use serde::de::IntoDeserializer;
-use serde_json::{from_str, value::RawValue};
-use std::collections::hash_map::RandomState;
-use std::collections::{HashMap, HashSet};
+use serde_json::value::Value as JsonValue;
+use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 use std::num::NonZeroU32;
-use suffix::SuffixTable;
+use std::path::Path;
+use tokio::time::Instant;
+
+#[cfg(feature = "sam")]
+use crate::sa::Index as SAIndex;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Dimensions(pub NonZeroU32, pub NonZeroU32);
@@ -55,29 +60,53 @@ pub struct Page {
 #[derive(Debug, Clone)]
 pub struct Illust {
     pub(crate) data: api::Illust,
-    #[cfg(feature = "compress")]
-    raw_data: Vec<u8>,
-    #[cfg(not(feature = "compress"))]
-    raw_data: Box<RawValue>,
     pub(crate) pages: Vec<Page>,
-    pub(crate) intro: String,
     deleted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedStatus {
+    New,
+    #[cfg(feature = "sam")]
+    IntroChanged,
+    #[cfg(feature = "sam")]
+    IntroUnchanged,
+    #[cfg(not(feature = "sam"))]
+    Updated,
+}
+
+#[derive(Debug, Clone)]
+struct StagedItem {
+    id: IllustId,
+    json: Vec<u8>,
+    status: StagedStatus,
 }
 
 #[derive(Debug, Default, Clone)]
 struct IllustStage {
-    ids: Vec<IllustId>,
-    dirty: bool,
+    cache: BTreeSet<Vec<u8>>,
+    todo: Vec<StagedItem>,
 }
 
-#[derive(Debug, Clone)]
+impl IllustStage {
+    fn new_ids(todo: &[StagedItem]) -> impl DoubleEndedIterator<Item = IllustId> + '_ {
+        todo.iter().filter_map(|item| {
+            if item.status == StagedStatus::New {
+                Some(item.id)
+            } else {
+                None
+            }
+        })
+    }
+}
+
 pub struct IllustIndex {
+    store: Store,
     pub map: HashMap<IllustId, Illust>,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
-    pub dirty: bool,
-    stages: Vec<IllustStage>,
-    sam: SuffixTable<'static, 'static>,
-    sam_ind: Vec<IllustId>,
+    stages: [IllustStage; 2],
+    #[cfg(feature = "sam")]
+    sa: SAIndex,
     disable_select: bool,
 }
 
@@ -96,7 +125,7 @@ fn make_intro(data: &api::Illust) -> String {
         s.push('\\');
         s.push_str(&t.name);
     }
-    s = s.to_lowercase();
+    s = normalized(&s);
     s.push_str("\\$s");
     s.push_str(&data.sanity_level.to_string());
     s.push_str("\\$x");
@@ -122,9 +151,17 @@ fn make_intro(data: &api::Illust) -> String {
 }
 
 impl Illust {
-    #[allow(clippy::boxed_local)]
-    fn new(raw_data: Box<RawValue>) -> Result<Self> {
-        let data = api::Illust::deserialize(raw_data.into_deserializer())?;
+    fn from_bytes(raw_json: &[u8]) -> Result<Self> {
+        let data = serde_json::from_slice::<api::Illust>(raw_json)?;
+        Self::new(data)
+    }
+
+    fn from_value(raw_json: JsonValue) -> Result<Self> {
+        let data = serde_json::from_value::<api::Illust>(raw_json)?;
+        Self::new(data)
+    }
+
+    fn new(data: api::Illust) -> Result<Self> {
         let pages = if data.page_count == 1 {
             vec![Page::new(
                 data.meta_single_page
@@ -147,112 +184,84 @@ impl Illust {
             }
             vec
         };
-        let intro = make_intro(&data);
-
-        #[cfg(feature = "compress")]
-        let raw_data = {
-            use std::io::Write;
-
-            let raw_data = raw_data.get().as_bytes();
-            let mut encoder = lz4::EncoderBuilder::new()
-                .content_size(raw_data.len() as u64)
-                .build(Vec::new())?;
-            encoder.write_all(raw_data)?;
-            let (mut raw_data, result) = encoder.finish();
-            result?;
-            raw_data.shrink_to_fit();
-            raw_data
-        };
 
         Ok(Self {
             data,
-            raw_data,
             pages,
-            intro,
             deleted: false,
         })
     }
 
-    #[cfg(feature = "compress")]
-    fn to_raw_data(&self) -> Result<Box<RawValue>> {
-        use std::io::Read;
-
-        let mut decoder = lz4::Decoder::new(&self.raw_data[..])?;
-        let mut s = String::new();
-        decoder.read_to_string(&mut s)?;
-        Ok(RawValue::from_string(s)?)
+    fn intro(&self) -> String {
+        make_intro(&self.data)
     }
 }
 
 pub type DimCache = Vec<(IllustId, Vec<u32>)>;
 
+#[derive(Deserialize)]
+struct OnlyId {
+    id: IllustId,
+}
+
 impl IllustIndex {
-    pub fn parse(s: String, disable_select: bool) -> serde_json::error::Result<Self> {
-        let illusts: Vec<Box<RawValue>> = from_str(&s)?;
-        let size = illusts.iter().map(|i| i.get().len()).sum::<usize>();
-        let mut ids = Vec::with_capacity(illusts.len());
+    pub async fn connect(db_file: &Path, disable_select: bool, create: bool) -> Result<Self> {
+        let store = Store::open(db_file, create).await?;
+        let illusts = store.illusts().await?;
 
-        let mut sam = String::new();
-        let mut sam_ind = Vec::new();
-        let map = HashMap::from_iter(illusts.into_iter().map(|data| {
-            // FIXME: do not unwrap
-            let o = Illust::new(data).unwrap();
-            ids.push(o.data.id);
-            if !disable_select {
-                sam.push_str(&o.intro);
-                for _ in 0..o.intro.len() {
-                    sam_ind.push(o.data.id);
-                }
-            }
-            (o.data.id, o)
-        }));
-        debug!("parsed {} illlusts", map.len());
-
-        let n = sam.len();
-        #[cfg(feature = "compress")]
+        if let Ok(s) = std::env::var("PVG_DEBUG_RESAVE_ALL")
+            && s == "1"
         {
-            let size2 = map.values().map(|i| i.raw_data.len()).sum::<usize>();
-            info!(
-                "raw: {} MiB -> {} MiB, sam: {n} * 8 = {} MiB",
-                size >> 20,
-                size2 >> 20,
-                n >> 17
-            );
+            warn!("resaving all illusts!");
+            let n = illusts.len();
+            let todo = illusts.iter().map(|data| {
+                let iid = serde_json::from_slice::<OnlyId>(data).unwrap().id;
+                (data, iid)
+            });
+            info!("resaving {n} illusts");
+            store.overwrite(todo).await?;
+            info!("resaved {n} illusts");
         }
 
-        #[cfg(not(feature = "compress"))]
-        info!("raw: {} MiB, sam: {n} * 8 = {} MiB", size >> 20, n >> 17);
+        let size = illusts.iter().map(|i| i.len()).sum::<usize>();
 
-        let mut stages = Vec::with_capacity(2);
-        stages.resize_with(2, Default::default);
+        let mut ids = Vec::with_capacity(illusts.len());
 
-        let sam = SuffixTable::new(sam);
-        debug!("built suffix table");
+        let map = HashMap::from_iter(illusts.into_iter().map(|data| {
+            // FIXME: do not unwrap
+            let o = Illust::from_bytes(&data).unwrap();
+
+            ids.push(o.data.id);
+
+            (o.data.id, o)
+        }));
+
+        info!("parsed {} illlusts, raw: {} MiB", map.len(), size >> 20);
+
+        #[cfg(feature = "sam")]
+        let sa = if disable_select {
+            Default::default()
+        } else {
+            SAIndex::new(ids.iter().map(|id| (*id, map[id].intro())))
+        };
+
+        #[cfg(feature = "sam")]
+        {
+            let n = sa.size();
+            let mem = sa.memory();
+            let coef = mem as f64 / n as f64;
+            info!("sa: {n} * {coef:.3} = {} MiB", mem >> 20);
+        }
 
         Ok(Self {
+            store,
             map,
             ids,
-            dirty: false,
-            stages,
-            sam,
-            sam_ind,
+            stages: [IllustStage::default(), IllustStage::default()],
+            #[cfg(feature = "sam")]
+            sa,
             disable_select,
         })
-    }
-
-    pub fn dump(&self) -> Result<Vec<u8>> {
-        // FIXME: serde can't do async streaming for now.
-        info!("collecting {} illlusts", self.len());
-        #[cfg(feature = "compress")]
-        let v = self
-            .iter()
-            .map(|i| i.to_raw_data())
-            .collect::<Result<Vec<_>>>()?;
-
-        #[cfg(not(feature = "compress"))]
-        let v = self.iter().map(|i| &i.raw_data).collect::<Vec<_>>();
-        info!("dumping {} illlusts", v.len());
-        Ok(serde_json::to_vec(&v)?)
     }
 
     pub fn load_dims_cache(&mut self, cache: DimCache) -> Result<()> {
@@ -320,18 +329,28 @@ impl IllustIndex {
         self.map.get(&iid).and_then(|i| i.pages.get(pn as usize))
     }
 
-    pub fn ensure_stage_clean(&self, stage: usize) -> Result<()> {
-        let stage = &self.stages[stage];
-        if stage.dirty || !stage.ids.is_empty() {
+    pub fn ensure_stage_clean(&self, stage_id: usize) -> Result<()> {
+        let stage = &self.stages[stage_id];
+        if !stage.todo.is_empty() {
+            error!("stage {} is dirty! ({})", stage_id, stage.todo.len());
             bail!("stage not clean");
         }
         Ok(())
     }
 
-    pub fn stage(&mut self, stage: usize, illust: Box<RawValue>) -> Result<bool> {
-        let mut illust = Illust::new(illust)?;
+    pub fn stage(&mut self, stage_id: usize, raw: JsonValue) -> Result<bool> {
+        // Instead of using `RawValue`, we reserialize it to sanitize the JSON
+        // (pixiv escapes unicode chars). Feature `preserve_order` is enforced here.
+        let json = serde_json::to_vec(&raw)?;
+
+        let mut illust = Illust::from_value(raw)?;
+        trace!(
+            "staging {} {} {}",
+            stage_id, illust.data.id, illust.data.title
+        );
         let id = illust.data.id;
-        let stage = &mut self.stages[stage];
+        let stage = &mut self.stages[stage_id];
+        let mut status = StagedStatus::New;
         if !illust.data.visible {
             if let Some(old) = self.map.get_mut(&id) {
                 if !old.deleted {
@@ -357,132 +376,167 @@ impl IllustIndex {
             );
             let r = self.map.insert(id, illust);
             assert!(r.is_none());
-        } else if self.map.insert(illust.data.id, illust).is_some() {
-            // TODO: how to know if this illust is updated?
-            stage.dirty = true;
-            return Ok(false);
-        }
-        stage.dirty = true;
-        stage.ids.push(id);
-        Ok(true)
-    }
-
-    pub fn peek(&self, stage: usize) -> &[IllustId] {
-        &self.stages[stage].ids
-    }
-
-    pub fn commit(&mut self, stage: usize) -> usize {
-        let stage = &mut self.stages[stage];
-        let delta = stage.ids.len();
-        let n = self.ids.len();
-        self.ids.extend(stage.ids.drain(..).rev());
-        assert_eq!(self.ids.len(), n + delta);
-        if delta > 0 || stage.dirty {
-            self.dirty = true;
-        }
-        stage.dirty = false;
-
-        if !self.disable_select {
-            self.sam = SuffixTable::new(self.ids.iter().map(|iid| &self.map[iid].intro).join(""));
-            self.sam_ind = self
-                .ids
-                .iter()
-                .flat_map(|iid| {
-                    let n = self.map[iid].intro.len();
-                    std::iter::repeat_n(*iid, n)
-                })
-                .collect_vec();
-        }
-
-        delta
-    }
-
-    pub fn rollback(&mut self, stage: usize) -> usize {
-        let stage = &mut self.stages[stage];
-        let delta = stage.ids.len();
-        let n = self.map.len();
-        for id in stage.ids.drain(..) {
-            self.map.remove(&id);
-        }
-        // Callers must ensure ids from different stages don't overlap
-        assert_eq!(self.map.len(), n - delta);
-        stage.dirty = false;
-        delta
-    }
-
-    fn single_select(&self, pattern: &str) -> Vec<IllustId> {
-        self.sam
-            .positions(pattern)
-            .iter()
-            .sorted_unstable()
-            .map(|i| self.sam_ind[*i as usize])
-            .dedup()
-            .collect_vec()
-    }
-
-    fn _select_many_sam(&self, filters: &[String]) -> Vec<IllustId> {
-        // assert len(filters) > 0
-        let mut sets = filters
-            .iter()
-            .map(|patt| self.single_select(patt))
-            .collect_vec();
-        let i = sets
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, v)| v.len())
-            .unwrap()
-            .0;
-        info!("matches: {:?}", sets.iter().map(|v| v.len()).collect_vec());
-        let off = sets.split_off(i + 1);
-        let mut inter = sets.pop().unwrap();
-        for vec in [sets, off] {
-            for o in vec {
-                let s: HashSet<IllustId, RandomState> = HashSet::from_iter(o.into_iter());
-                inter.retain(|e| s.contains(e));
+        } else {
+            match self.map.entry(illust.data.id) {
+                Entry::Occupied(mut ent) => {
+                    let old = ent.get();
+                    if !stage.cache.is_empty() {
+                        if stage.cache.contains(&json) {
+                            // The exactly same data already exists in the map.
+                            return Ok(false);
+                        }
+                        trace!("{}: illust updated: {}", stage_id, id);
+                        trace!("old: {:?}", old.data);
+                        trace!("new: {:?}", illust.data);
+                    }
+                    #[cfg(feature = "sam")]
+                    {
+                        let old_intro = old.intro();
+                        let intro = illust.intro();
+                        status = if old_intro == intro {
+                            StagedStatus::IntroUnchanged
+                        } else {
+                            warn!("{}: intro changed: {}", stage_id, id);
+                            warn!("old: {}", old_intro);
+                            warn!("new: {}", intro);
+                            StagedStatus::IntroChanged
+                        };
+                    }
+                    #[cfg(not(feature = "sam"))]
+                    {
+                        status = StagedStatus::Updated;
+                    }
+                    ent.insert(illust);
+                }
+                Entry::Vacant(ent) => {
+                    ent.insert(illust);
+                }
             }
         }
-        inter
+        stage.todo.push(StagedItem { id, json, status });
+        Ok(status == StagedStatus::New)
     }
 
-    fn _select_best_sam(&self, filters: &[String]) -> Vec<&Illust> {
-        // assert len(filters) > 0
-        let (i, a) = filters
-            .iter()
-            .map(|patt| self.sam.positions(patt))
-            .enumerate()
-            .min_by_key(|(_, pos)| pos.len())
-            .unwrap();
-        a.iter()
-            .sorted_unstable()
-            .map(|p| self.sam_ind[*p as usize])
-            .dedup()
-            .map(|iid| &self.map[&iid])
-            .filter(|illust| {
-                filters
-                    .iter()
-                    .enumerate()
-                    .all(|(p, tag)| p == i || illust.intro.contains(tag))
-            })
-            .collect_vec()
+    pub fn peek(&self, stage_id: usize) -> impl ExactSizeIterator<Item = IllustId> + Clone + '_ {
+        self.stages[stage_id].todo.iter().map(|item| item.id)
     }
 
-    pub fn select(&self, filters: &[String]) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
-        if filters.is_empty() {
+    // The staged illusts are already applied to `self.map``, we commit them to
+    // `self.ids` and the store here.
+    pub async fn commit(&mut self, stage_id: usize) -> usize {
+        let the_stage = &mut self.stages[stage_id];
+        let stage = std::mem::take(&mut the_stage.todo);
+        let cnt = stage.len();
+
+        if cnt == 0 {
+            return 0;
+        }
+
+        #[cfg(feature = "sam")]
+        let mut sa_needs_dedup = false;
+
+        #[cfg(feature = "sam")]
+        let intro_changed_ids = if !self.disable_select {
+            stage
+                .iter()
+                .filter_map(|item| {
+                    if item.status != StagedStatus::IntroUnchanged {
+                        sa_needs_dedup |= item.status == StagedStatus::IntroChanged;
+                        Some(item.id)
+                    } else {
+                        None
+                    }
+                })
+                .collect_vec()
+        } else {
+            Vec::new()
+        };
+
+        let new_ids = IllustStage::new_ids(&stage).rev().collect_vec();
+        let delta = new_ids.len();
+        info!("{}: committing {} illusts ({} new)", stage_id, cnt, delta);
+        if let Err(e) = self
+            .store
+            .upsert(stage.iter().map(|item| (&item.json, item.id)))
+            .await
+        {
+            critical!("FAILED TO STORE {} ({} new) ILLUSTS: {:?}", cnt, delta, e);
+            self.do_rollback(new_ids.into_iter(), stage_id, cnt);
+            return 0;
+        }
+
+        the_stage.cache = BTreeSet::from_iter(stage.into_iter().map(|item| item.json));
+        self.ids.extend(new_ids);
+
+        if !self.disable_select {
+            #[cfg(feature = "sam")]
+            {
+                // XXX: This handles updated illusts with intro changed as well,
+                // but the order is not perfectly preserved.
+                self.sa.insert(
+                    intro_changed_ids
+                        .iter()
+                        .map(|iid| {
+                            let o = &self.map[iid];
+                            (*iid, o.intro())
+                        })
+                        .collect_vec(),
+                    sa_needs_dedup,
+                );
+            }
+        }
+
+        // We return the number of all affected illusts (new + updated) here.
+        // This ensures when new pages are added to an existing illust (likely
+        // on the first page fetch), the caller still invokes a download task.
+        cnt
+    }
+
+    pub fn rollback(&mut self, stage_id: usize) -> usize {
+        let stage = std::mem::take(&mut self.stages[stage_id].todo);
+        let cnt = stage.len();
+        self.do_rollback(IllustStage::new_ids(&stage), stage_id, cnt)
+    }
+
+    fn do_rollback<I: Iterator<Item = IllustId>>(
+        &mut self,
+        new_ids: I,
+        stage_id: usize,
+        cnt: usize,
+    ) -> usize {
+        let n = self.ids.len();
+        for id in new_ids {
+            // XXX: The overwritten illust (when new = false) is not restored.
+            self.map.remove(&id);
+        }
+        let delta = n - self.ids.len();
+        error!(
+            "{}: rolled back {} illusts (out of {})",
+            stage_id, delta, cnt
+        );
+        // Callers must ensure ids from different stages don't overlap
+        delta
+    }
+
+    pub fn select(
+        &self,
+        filters: &[String],
+        ban_filters: &[String],
+    ) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
+        if filters.is_empty() && ban_filters.is_empty() {
             return Box::new(self.iter());
         }
-        let res = if filters.len() == 1 {
-            self.single_select(&filters[0])
-        } else {
-            // self._select_many_sam(filters)
-            return Box::new(self._select_best_sam(filters).into_iter());
-        };
-        /* assert_eq!(
-            res,
-            self.iter()
-                .filter(|illust| { filters.iter().all(|s| illust.intro.contains(s)) })
-                .map(|illust| illust.data.id)
-                .collect_vec()
-        ); */
-        Box::new(res.into_iter().map(|iid| &self.map[&iid]))
+        #[cfg(feature = "sam")]
+        {
+            let t0 = Instant::now();
+            let res = self.sa.select(filters, ban_filters);
+            info!("sa: {} items in {:?}", res.len(), t0.elapsed());
+            Box::new(res.into_iter().map(|iid| &self.map[&iid]))
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            error!("not built with sam feature, select is disabled");
+            Box::new(std::iter::empty())
+        }
     }
 }

@@ -11,3 +11,13 @@ macro_rules! bug {
         error!(concat!("BUG: ", $f) $(,$x)*)
     };
 }
+
+pub fn normalized(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    s.to_lowercase()
+        .cjk_compat_variants()
+        .collect::<String>()
+        .nfkc()
+        .collect::<String>()
+}

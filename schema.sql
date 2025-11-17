@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS Illust (
+    id    INTEGER PRIMARY KEY,
+    data  BLOB    NOT NULL,
+    iid   INTEGER NOT NULL UNIQUE
+);
