@@ -1,4 +1,3 @@
-use crate::bug;
 use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
@@ -6,24 +5,23 @@ use crate::model::{Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
-use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock};
 use pixiv::aapi::Restrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use serde_json::value::Value;
 use std::collections::HashSet;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{Mutex as TokioMutex, Semaphore, mpsc};
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, RwLockWriteGuard, Semaphore, mpsc};
 use tokio::time::{Duration, Instant, sleep};
 use tokio::{fs, try_join};
 
@@ -52,16 +50,12 @@ struct SavingCache<'a> {
     worker_to_download: &'a [IllustId],
 }
 
-#[derive(Debug)]
 pub struct Pvg {
     pub conf: Config,
-    #[allow(dead_code)]
-    lock: std::fs::File,
-    index: RwLock<IllustIndex>,
-    api: tokio::sync::RwLock<AuthedClient>,
+    index: TokioRwLock<IllustIndex>,
+    api: TokioRwLock<AuthedClient>,
     pixiv: DownloadClient,
     uid: String,
-    disk_index_size: TokioMutex<usize>,
     download_all_lock: TokioMutex<()>,
     not_found: Mutex<HashSet<PathBuf>>,
     disk_lru: RwLock<DiskLru>,
@@ -73,7 +67,7 @@ pub struct Pvg {
 
 #[derive(Deserialize, Debug)]
 pub struct BookmarkPage {
-    illusts: Vec<Box<RawValue>>,
+    illusts: Vec<Value>,
     next_url: Option<String>,
 }
 
@@ -92,34 +86,12 @@ impl Pvg {
                 std::env::set_var("ALL_PROXY", proxy);
             }
         }
-        let (mut nav, lock) = match std::fs::File::open(&config.db_file) {
-            Ok(mut db) => {
-                db.try_lock_exclusive()?;
-                let mut s = String::new();
-                db.read_to_string(&mut s)?;
-                info!("read {} bytes from {:?}", s.len(), db);
-                let nav = IllustIndex::parse(s, config.disable_select)?;
-                (nav, db)
-            }
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    info!("creating new db file");
-                    let lock = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&config.db_file)?;
-                    drop(lock);
-                    let lock = std::fs::File::open(&config.db_file)?;
-                    lock.try_lock_exclusive()?;
-                    (
-                        IllustIndex::parse("[]".to_owned(), config.disable_select)?,
-                        lock,
-                    )
-                } else {
-                    return Err(e.into());
-                }
-            }
-        };
+        let mut nav = IllustIndex::connect(
+            config.db_file.as_path(),
+            config.disable_select,
+            config.worker_delay_secs == 0,
+        )
+        .await?;
         info!(
             "index: {} illusts in {} ms",
             nav.len(),
@@ -223,14 +195,12 @@ impl Pvg {
         );
         Ok(Pvg {
             conf: config,
-            lock,
-            index: RwLock::new(nav),
-            api: tokio::sync::RwLock::new(api),
+            index: TokioRwLock::new(nav),
+            api: TokioRwLock::new(api),
             uid,
             pixiv: DownloadClient::new(),
             download_all_lock: Default::default(),
             not_found: Mutex::new(not_found),
-            disk_index_size: TokioMutex::new(index_size),
             disk_lru: RwLock::new(lru),
             lru_limit,
             upscaler,
@@ -241,23 +211,6 @@ impl Pvg {
 
     pub fn is_worker(&self) -> bool {
         self.conf.worker_delay_secs > 0
-    }
-
-    fn dump_index(&self, index_size: usize) -> Result<Option<(Vec<u8>, usize)>> {
-        let index = self.index.read();
-        let n = index.len();
-        Ok(if index.dirty {
-            Some((index.dump()?, n))
-        } else if n != index_size {
-            bug!(
-                "DB SIZE CHANGED WITHOUT DIRTY FLAG! {} -> {}",
-                index_size,
-                n
-            );
-            Some((index.dump()?, n))
-        } else {
-            None
-        })
     }
 
     async fn dump_cache(&self) -> serde_json::Result<String> {
@@ -292,57 +245,14 @@ impl Pvg {
         Ok(())
     }
 
-    async fn save_index(&self) -> Result<()> {
-        let mut index_size = self.disk_index_size.lock().await;
-        let old_size = *index_size;
-        match self.dump_index(old_size) {
-            Ok(s) => {
-                if let Some((s, new_size)) = s {
-                    *index_size = new_size;
-                    if let Err(e) =
-                        fs::rename(&self.conf.db_file, &self.conf.db_file.with_extension("bak"))
-                            .await
-                    {
-                        error!("failed to rename old db: {e}");
-                    }
-                    let n = s.len();
-                    debug!("writing {n} bytes");
-                    match fs::write(&self.conf.db_file, s).await {
-                        Ok(_) => {
-                            let diff = new_size as isize - old_size as isize;
-                            info!(
-                                "written {} MiB into db {:?} ({old_size} -> {new_size}, {diff:+})",
-                                n >> 20,
-                                self.conf.db_file
-                            )
-                        }
-                        Err(e) => {
-                            error!("failed to write db {:?}: {}", self.conf.db_file, e);
-                            return Err(e.into());
-                        }
-                    }
-                    // TODO: mark index to be clean within the same guard
-                } else {
-                    info!("index is clean");
-                }
-            }
-            Err(e) => {
-                error!("failed to dump index: {e}");
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
     pub async fn save(&self) -> Result<()> {
-        self.save_index().await?;
         self.save_cache().await?;
         Ok(())
     }
 
-    fn _quick_update_with_page(&self, stage: usize, r: Vec<Box<RawValue>>) -> Result<bool> {
+    async fn _quick_update_with_page(&self, stage: usize, r: Vec<Value>) -> Result<bool> {
         let mut updated = false;
-        let mut index = self.index.write();
+        let mut index = self.index.write().await;
         for illust in r {
             if index.stage(stage, illust)? {
                 updated = true;
@@ -372,7 +282,7 @@ impl Pvg {
         if !self.is_worker() {
             info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
         }
-        if self._quick_update_with_page(stage, r.illusts)? {
+        if self._quick_update_with_page(stage, r.illusts).await? {
             return Ok(());
         }
         while let Some(u) = r.next_url {
@@ -380,12 +290,14 @@ impl Pvg {
             if pn > pn_limit {
                 break;
             }
+            tokio::time::sleep(Duration::from_secs(3)).await;
             r = loop {
                 match self.auth().await?.call_url(&u).await {
                     Ok(x) => {
                         break x;
                     }
                     Err(e) => {
+                        // TODO: this is flawed
                         if e.to_string().to_ascii_lowercase().contains("rate limit") {
                             warn!("rate limited, sleeping for 60 secs");
                             sleep(Duration::from_secs(60)).await;
@@ -398,7 +310,7 @@ impl Pvg {
             if !self.is_worker() {
                 info!("page {}: {} illusts", pn, r.illusts.len());
             }
-            if self._quick_update_with_page(stage, r.illusts)? {
+            if self._quick_update_with_page(stage, r.illusts).await? {
                 break;
             }
         }
@@ -408,7 +320,7 @@ impl Pvg {
     async fn quick_update_atomic(&self) -> Result<RwLockWriteGuard<'_, IllustIndex>> {
         let _ = self.update_lock.try_lock()?;
         let empty = {
-            let index = self.index.read();
+            let index = self.index.read().await;
             index.ensure_stage_clean(0)?;
             index.ensure_stage_clean(1)?;
             index.len() == 0
@@ -422,10 +334,10 @@ impl Pvg {
             self._quick_update(0, Restrict::Private, limit),
             self._quick_update(1, Restrict::Public, limit),
         );
-        let mut index = self.index.write();
+        let mut index = self.index.write().await;
         if let Err(e) = r {
             error!(
-                "quick update failed ({} + {} rolled back): {}",
+                "quick update failed ({} + {} rolled back): {:?}",
                 index.rollback(1),
                 index.rollback(0),
                 e,
@@ -435,35 +347,34 @@ impl Pvg {
         Ok(index)
     }
 
-    fn commit_stage_worker(
+    async fn commit_stage_worker(
         &self,
-        index: &mut RwLockWriteGuard<IllustIndex>,
+        index: &mut RwLockWriteGuard<'_, IllustIndex>,
         stage: usize,
         name: &'static str,
         res: &mut Vec<IllustId>,
     ) {
-        let a = index.peek(stage);
-        if !a.is_empty() {
-            res.extend(a);
+        {
+            let a = index.peek(stage);
             let n = a.len();
-            let s = a.iter().map(|i| i.to_string()).join(", ");
-            info!("{name}: {n} illusts: {s}");
+            if n > 0 {
+                let s = a.clone().map(|i| i.to_string()).join(", ");
+                res.extend(a);
+                info!("{name}: {n} illusts: {s}");
+            }
         }
-        index.commit(stage);
+        index.commit(stage).await;
     }
 
     pub async fn quick_update(&self) -> Result<(usize, usize)> {
         let (n_pri, n_pub) = {
             let mut index = self.quick_update_atomic().await?;
             // commit private first
-            let n_pri = index.commit(0);
-            let n_pub = index.commit(1);
+            let n_pri = index.commit(0).await;
+            let n_pub = index.commit(1).await;
             (n_pri, n_pub)
         };
         info!("quick updated {n_pub} + {n_pri} illusts");
-        if n_pub + n_pri > 0 {
-            self.save_index().await?;
-        }
         Ok((n_pri, n_pub))
     }
 
@@ -471,17 +382,16 @@ impl Pvg {
         let mut ids = Vec::new();
         {
             let mut index = self.quick_update_atomic().await?;
-            self.commit_stage_worker(&mut index, 0, "private", &mut ids);
-            self.commit_stage_worker(&mut index, 1, "public", &mut ids);
-        }
-        if !ids.is_empty() {
-            self.save_index().await?;
+            self.commit_stage_worker(&mut index, 0, "private", &mut ids)
+                .await;
+            self.commit_stage_worker(&mut index, 1, "public", &mut ids)
+                .await;
         }
         Ok(ids)
     }
 
-    pub fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
-        let index = self.index.read();
+    pub async fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
+        let index = self.index.read().await;
         let src = &index.get_page(iid, pn)?.source;
         let file = src.filename();
         let pile: &Path = file.as_ref();
@@ -498,7 +408,7 @@ impl Pvg {
 
     pub async fn upscale(&self, iid: IllustId, pn: PageNum, scale: u8) -> Result<PathBuf> {
         let file = {
-            let index = self.index.read();
+            let index = self.index.read().await;
             let src = &index.get_page(iid, pn).context("no such page")?.source;
             src.filename().to_owned()
         };
@@ -674,13 +584,13 @@ impl Pvg {
         (path, r)
     }
 
-    fn make_download_queue(&self) -> Vec<(String, PathBuf)> {
+    async fn make_download_queue(&self) -> Vec<(String, PathBuf)> {
+        let index = self.index.read().await;
         let not_found = self.not_found.lock();
         let disk = self.disk_lru.read();
         let mut cnt_404 = 0;
-        let r = self
-            .index
-            .read()
+
+        let r = index
             .iter()
             .flat_map(|illust| illust.pages.iter())
             .map(|page| (&page.source, page.source.filename()))
@@ -703,8 +613,8 @@ impl Pvg {
         r
     }
 
-    fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(String, PathBuf)> {
-        let index = self.index.read();
+    async fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(String, PathBuf)> {
+        let index = self.index.read().await;
         let not_found = self.not_found.lock();
         let disk = self.disk_lru.read();
         let mut cnt_404 = 0;
@@ -739,13 +649,13 @@ impl Pvg {
     pub async fn download_all(&self) -> Result<i32> {
         let _ = self.download_all_lock.try_lock()?;
         // FIXME: generate the whole queue in sync for now to avoid the use of async locks.
-        let q = self.make_download_queue();
+        let q = self.make_download_queue().await;
         self._download_all(q).await
     }
 
     async fn download_all_worker(&self, ids: &[IllustId]) -> Result<i32> {
         let _ = self.download_all_lock.try_lock()?;
-        let q = self.make_download_queue_from(ids);
+        let q = self.make_download_queue_from(ids).await;
         self._download_all(q).await
     }
 
@@ -753,7 +663,11 @@ impl Pvg {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
-        info!("{} pages to download", q.len());
+        if q.is_empty() {
+            debug!("no pages to download");
+            return Ok(0);
+        }
+        debug!("{} pages to download", q.len());
         let mut futs = q
             .into_iter()
             .map(|(url, path)| self._downloader(url, path))
@@ -913,7 +827,7 @@ struct SelectResponse<'a> {
 }
 
 impl Pvg {
-    pub fn select(
+    pub async fn select(
         &self,
         mut filters: Vec<String>,
         ban_filters: Option<Vec<String>>,
@@ -923,25 +837,28 @@ impl Pvg {
         }
 
         let now = Instant::now();
-        let index = self.index.read();
-        let it = index.select(&filters);
-        let r = if let Some(bans) = ban_filters {
-            if !bans.is_empty() {
-                self._select(it.filter(|i| !bans.iter().any(|b| i.intro.contains(b))))
+        let index = self.index.read().await;
+        let r = self._select(index.select(
+            &filters,
+            if let Some(bans) = &ban_filters {
+                bans
             } else {
-                self._select(it)
-            }
-        } else {
-            self._select(it)
-        };
+                &[]
+            },
+        ));
 
         let now2 = Instant::now();
         let t = (now2 - now).as_millis();
         let n = r.len();
         let r = serde_json::to_string(&SelectResponse { items: r })?;
         info!(
-            "{:?}: {} illusts ({:.1} KiB) in {} + {} ms",
+            "{:?} - {:?}: {} illusts ({:.1} KiB) in {} + {} ms",
             filters,
+            if let Some(bans) = ban_filters.as_deref() {
+                bans
+            } else {
+                &[]
+            },
             n,
             r.len() as f32 / 1024.,
             t,
@@ -995,8 +912,8 @@ impl Pvg {
 }
 
 impl Pvg {
-    fn orphan(&self) -> Vec<String> {
-        let index = self.index.read();
+    async fn orphan(&self) -> Vec<String> {
+        let index = self.index.read().await;
         let s: HashSet<_> = index
             .iter()
             .flat_map(|illust| illust.pages.iter())
@@ -1008,7 +925,7 @@ impl Pvg {
     }
 
     pub async fn remove_orphans(&self) -> usize {
-        let a = self.orphan();
+        let a = self.orphan().await;
         let n = a.len();
         if n > 0 {
             for file in a {
@@ -1021,7 +938,7 @@ impl Pvg {
     }
 
     pub async fn move_orphans(&self) -> usize {
-        let a = self.orphan();
+        let a = self.orphan().await;
         let n = a.len();
         if n > 0 {
             for file in a {

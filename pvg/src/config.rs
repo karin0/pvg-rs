@@ -98,7 +98,7 @@ pub fn read_config() -> Result<Config> {
         pix_dir: at_dir("pix"),
         tmp_dir: ensure_empty_dir(at("tmp")),
         orphan_dir: at_dir("orphan"),
-        db_file: at("fav.json"),
+        db_file: at("fav.db"),
         cache_file: at("cache.json"),
         static_dir,
         addr,

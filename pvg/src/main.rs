@@ -3,10 +3,15 @@ mod core;
 mod disk_lru;
 mod download;
 mod model;
+mod store;
 mod upscale;
 mod util;
 
+#[cfg(feature = "sam")]
+mod sa;
+
 use crate::core::Pvg;
+use crate::util::normalized;
 use actix_cors::Cors;
 use actix_files::NamedFile;
 use actix_web::http::{StatusCode, header::ContentType};
@@ -36,7 +41,7 @@ async fn image(
 ) -> io::Result<Either<NamedFile, HttpResponse>> {
     let app = app.into_inner();
     let (iid, pn) = path.into_inner();
-    match app.get_source(iid, pn) {
+    match app.get_source(iid, pn).await {
         Some((src, path)) => match NamedFile::open_async(&path).await {
             Ok(f) => Ok(Either::Left(f)),
             Err(e) => {
@@ -65,15 +70,17 @@ struct SelectPayload {
 #[post("/select")]
 async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl Responder {
     let payload = payload.into_inner();
+    debug!("select: {:?}", payload);
     let filters: Vec<_> = payload
         .filters
         .into_iter()
-        .map(|s| s.to_lowercase())
+        .map(|s| normalized(&s))
         .collect();
     let ban_filters: Option<Vec<_>> = payload
         .ban_filters
-        .map(|v| v.into_iter().map(|s| s.to_lowercase()).collect());
-    let r = app.select(filters, ban_filters).map_err(mapper)?;
+        .map(|v| v.into_iter().map(|s| normalized(&s)).collect());
+    info!("select: {:?} {:?}", filters, ban_filters);
+    let r = app.select(filters, ban_filters).await.map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
 
@@ -170,8 +177,7 @@ struct EnvResponse<'a> {
 
 const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
 
-#[get("/env")]
-async fn get_env(app: web::Data<Pvg>) -> impl Responder {
+fn _get_env(app: &Pvg) -> EnvResponse<'_> {
     let features = vec![
         #[cfg(feature = "io-uring")]
         "io-uring",
@@ -179,10 +185,10 @@ async fn get_env(app: web::Data<Pvg>) -> impl Responder {
         "image",
         #[cfg(feature = "rename2")]
         "rename2",
-        #[cfg(feature = "compress")]
-        "compress",
         #[cfg(feature = "dhat-heap")]
         "dhat-heap",
+        #[cfg(feature = "sam")]
+        "sam",
     ];
 
     let r = EnvResponse {
@@ -193,7 +199,12 @@ async fn get_env(app: web::Data<Pvg>) -> impl Responder {
         features,
     };
     info!("env: {:?}", r);
+    r
+}
 
+#[get("/env")]
+async fn get_env(app: web::Data<Pvg>) -> impl Responder {
+    let r = _get_env(&app);
     let r = serde_json::to_string(&r)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -230,6 +241,7 @@ async fn main() -> Result<()> {
         }
     })?;
     let data = web::Data::new(Pvg::new().await?);
+    _get_env(&data);
     let pvg = data.clone().into_inner();
 
     if pvg.is_worker() {
