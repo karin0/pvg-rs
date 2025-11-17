@@ -2,10 +2,10 @@ use crate::error::{Error, Result};
 use crate::model::{Response, User};
 use log::debug;
 use md5::{Digest, Md5, digest::Update};
-use once_cell::sync::Lazy;
 use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde_json::from_str;
+use std::sync::LazyLock;
 use time::format_description;
 use time::format_description::FormatItem;
 
@@ -13,7 +13,7 @@ const CLIENT_ID: &str = "MOBrBDS8blbauoSck0ZfDbtuzpyT";
 const CLIENT_SECRET: &str = "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj";
 const HASH_SECRET: &str = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c";
 
-static TIME_FORMAT: Lazy<Vec<FormatItem>> = Lazy::new(|| {
+static TIME_FORMAT: LazyLock<Vec<FormatItem>> = LazyLock::new(|| {
     format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]+00:00").unwrap()
 });
 

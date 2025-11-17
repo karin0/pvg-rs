@@ -44,7 +44,7 @@ impl Upscaler {
         if st.success() {
             Ok(())
         } else {
-            bail!("child returned {:?}", st);
+            bail!("child returned {st:?}");
         }
     }
 }

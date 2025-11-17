@@ -127,8 +127,8 @@ impl Pvg {
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
                     info!("no cache file");
-                    not_found = Default::default();
-                    worker_to_download = Default::default();
+                    not_found = HashSet::new();
+                    worker_to_download = Vec::new();
                     AuthedClient::new(&refresh_token).await?
                 } else {
                     return Err(e.into());
@@ -199,12 +199,12 @@ impl Pvg {
             api: TokioRwLock::new(api),
             uid,
             pixiv: DownloadClient::new(),
-            download_all_lock: Default::default(),
+            download_all_lock: TokioMutex::default(),
             not_found: Mutex::new(not_found),
             disk_lru: RwLock::new(lru),
             lru_limit,
             upscaler,
-            update_lock: Default::default(),
+            update_lock: TokioMutex::default(),
             worker_to_download: TokioMutex::new(worker_to_download),
         })
     }
@@ -239,8 +239,9 @@ impl Pvg {
         let len = s.len();
         tokio::fs::write(&self.conf.cache_file, s).await?;
         info!(
-            "cache: written {} bytes into {:?}",
-            len, self.conf.cache_file
+            "cache: written {} bytes into {}",
+            len,
+            self.conf.cache_file.display()
         );
         Ok(())
     }
@@ -434,7 +435,7 @@ impl Pvg {
     async fn disk_remove(&self, file: &str) {
         let path = self.page_path(file);
         if let Err(e) = fs::remove_file(&path).await {
-            error!("failed to remove {path:?}: {e}");
+            error!("failed to remove {}: {e}", path.display());
         }
     }
 
@@ -442,7 +443,7 @@ impl Pvg {
         let path = self.page_path(file);
         let dst = self.orphan_path(file);
         if let Err(e) = fs::rename(&path, &dst).await {
-            error!("failed to orphan {path:?}: {e}");
+            error!("failed to orphan {}: {e}", path.display());
         }
     }
 
@@ -489,12 +490,12 @@ impl Pvg {
             Err(e) => {
                 tmp.rollback().await;
                 if let pixiv::Error::Pixiv(404, _) = e {
-                    warn!("{path:?}: 404, memorized");
+                    warn!("{}: 404, memorized", path.display());
                     self.not_found
                         .lock()
                         .insert(path.file_name().unwrap().into());
                 } else {
-                    error!("{path:?}: request failed: {e:?}");
+                    error!("{}: request failed: {e:?}", path.display());
                 }
                 return Err(e.into());
             }
@@ -502,8 +503,8 @@ impl Pvg {
         };
         let size = remote.content_length();
         debug!(
-            "{:?}: connection established in {:.3} secs, {:?} B",
-            path,
+            "{}: connection established in {:.3} secs, {:?} B",
+            path.display(),
             t.elapsed().as_secs_f32(),
             size
         );
@@ -518,7 +519,7 @@ impl Pvg {
             while let Some(msg) = rx.recv().await {
                 if let Some(b) = msg {
                     if let Err(e) = tmp.write(&b).await {
-                        error!("{path:?}: failed to write temp: {e}");
+                        error!("{}: failed to write temp: {e}", path.display());
                         drop(perm);
                         tmp.rollback().await;
                         return;
@@ -526,7 +527,7 @@ impl Pvg {
                 } else {
                     drop(perm);
                     match tmp.commit(&path, size).await {
-                        Err(e) => error!("{path:?}: failed to save: {e}"),
+                        Err(e) => error!("{}: failed to save: {e}", path.display()),
                         Ok(size) => {
                             let file = path.file_name().unwrap().to_str().unwrap();
                             {
@@ -538,12 +539,12 @@ impl Pvg {
                     return;
                 }
             }
-            error!("{path:?}: remote error");
+            error!("{}: remote error", path.display());
             drop(perm);
             tmp.rollback().await;
         });
 
-        Ok((DownloadingStream { remote, path, tx }).stream())
+        Ok((DownloadingStream { remote, tx, path }).stream())
     }
 
     async fn _download_file(
@@ -562,7 +563,7 @@ impl Pvg {
         let r = match self.pixiv.download(url).await {
             Err(e) => {
                 tmp.rollback().await;
-                info!("{path:?}: connection failed: {e:?}");
+                info!("{}: connection failed: {e:?}", path.display());
                 return Err(e.into());
             }
             Ok(r) => r,
@@ -597,10 +598,10 @@ impl Pvg {
             .filter(|(_, file)| {
                 if !disk.contains(file) {
                     let file: &Path = file.as_ref();
-                    if !not_found.contains(file) {
-                        return true;
-                    } else {
+                    if not_found.contains(file) {
                         cnt_404 += 1;
+                    } else {
+                        return true;
                     }
                 }
                 false
@@ -625,10 +626,10 @@ impl Pvg {
                 let file = page.source.filename();
                 if !disk.contains(file) {
                     let file: &Path = file.as_ref();
-                    if !not_found.contains(file) {
-                        return true;
-                    } else {
+                    if not_found.contains(file) {
                         cnt_404 += 1;
+                    } else {
+                        return true;
                     }
                 }
                 false
@@ -680,7 +681,13 @@ impl Pvg {
             cnt += 1;
             match res {
                 Ok(size) => {
-                    info!("{}/{}: downloaded {:?} ({} KiB)", cnt, n, path, size >> 10);
+                    info!(
+                        "{}/{}: downloaded {} ({} KiB)",
+                        cnt,
+                        n,
+                        path.display(),
+                        size >> 10
+                    );
                     self.disk_lru
                         .write()
                         .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
@@ -690,7 +697,7 @@ impl Pvg {
                     error!("{cnt}/{n}: download failed: {e}");
                     // handle 404 (and 500 for 85136899?)
                     if let Ok(pixiv::Error::Pixiv(404, _)) = e.downcast::<pixiv::Error>() {
-                        warn!("{path:?}: 404!");
+                        warn!("{}: 404!", path.display());
                         the_404.push(path.file_name().unwrap().into());
                     }
                 }
@@ -702,7 +709,7 @@ impl Pvg {
             self.not_found.lock().extend(the_404.into_iter());
         }
         if cnt_fail > 0 {
-            bail!("failed to download {} pages out from {}", cnt_fail, cnt);
+            bail!("failed to download {cnt_fail} pages out from {cnt}");
         }
         info!("downloaded {cnt} pages");
         Ok(cnt)
@@ -838,7 +845,7 @@ impl Pvg {
 
         let now = Instant::now();
         let index = self.index.read().await;
-        let r = self._select(index.select(
+        let r = Self::_select(index.select(
             &filters,
             if let Some(bans) = &ban_filters {
                 bans
@@ -867,10 +874,7 @@ impl Pvg {
         Ok(r)
     }
 
-    fn _select<'a>(
-        &self,
-        index: impl DoubleEndedIterator<Item = &'a Illust>,
-    ) -> Vec<SelectedIllust<'a>> {
+    fn _select<'a>(index: impl DoubleEndedIterator<Item = &'a Illust>) -> Vec<SelectedIllust<'a>> {
         // TODO: do this all sync can block for long.
         index
             .rev()
@@ -885,7 +889,7 @@ impl Pvg {
                         if let Some(d) = page.dimensions {
                             curr_w = d.0.get();
                             curr_h = d.1.get();
-                        };
+                        }
                         SelectedPage(curr_w, curr_h, "img", page.source.filename())
                     })
                     .collect();
@@ -989,7 +993,7 @@ impl Pvg {
     // Disk states should be never checked in worker mode, as the user can move any downloaded stuff away.
     pub async fn worker_start(&self) {
         if self.conf.worker_delay_secs > 0 {
-            let d = Duration::from_secs(self.conf.worker_delay_secs as u64);
+            let d = Duration::from_secs(u64::from(self.conf.worker_delay_secs));
             info!("worker started with delay {d:?}");
             loop {
                 if let Err(e) = self.worker_body().await {

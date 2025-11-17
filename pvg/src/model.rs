@@ -223,24 +223,27 @@ impl IllustIndex {
             info!("resaved {n} illusts");
         }
 
-        let size = illusts.iter().map(|i| i.len()).sum::<usize>();
+        let size = illusts.iter().map(Vec::len).sum::<usize>();
 
         let mut ids = Vec::with_capacity(illusts.len());
 
-        let map = HashMap::from_iter(illusts.into_iter().map(|data| {
-            // FIXME: do not unwrap
-            let o = Illust::from_bytes(&data).unwrap();
+        let map = illusts
+            .into_iter()
+            .map(|data| {
+                // FIXME: do not unwrap
+                let o = Illust::from_bytes(&data).unwrap();
 
-            ids.push(o.data.id);
+                ids.push(o.data.id);
 
-            (o.data.id, o)
-        }));
+                (o.data.id, o)
+            })
+            .collect::<HashMap<_, _>>();
 
         info!("parsed {} illlusts, raw: {} MiB", map.len(), size >> 20);
 
         #[cfg(feature = "sam")]
         let sa = if disable_select {
-            Default::default()
+            SAIndex::default()
         } else {
             SAIndex::new(ids.iter().map(|id| (*id, map[id].intro())))
         };
@@ -266,7 +269,7 @@ impl IllustIndex {
 
     pub fn load_dims_cache(&mut self, cache: DimCache) -> Result<()> {
         let mut cnt = 0;
-        for (iid, a) in cache.iter() {
+        for (iid, a) in &cache {
             if let Some(i) = self.map.get_mut(iid) {
                 cnt += 1;
                 let pc = i.data.page_count as usize;
@@ -351,7 +354,43 @@ impl IllustIndex {
         let id = illust.data.id;
         let stage = &mut self.stages[stage_id];
         let mut status = StagedStatus::New;
-        if !illust.data.visible {
+        if illust.data.visible {
+            match self.map.entry(illust.data.id) {
+                Entry::Occupied(mut ent) => {
+                    let old = ent.get();
+                    if !stage.cache.is_empty() {
+                        if stage.cache.contains(&json) {
+                            // The exactly same data already exists in the map.
+                            return Ok(false);
+                        }
+                        trace!("{stage_id}: illust updated: {id}");
+                        trace!("old: {:?}", old.data);
+                        trace!("new: {:?}", illust.data);
+                    }
+                    #[cfg(feature = "sam")]
+                    {
+                        let old_intro = old.intro();
+                        let intro = illust.intro();
+                        status = if old_intro == intro {
+                            StagedStatus::IntroUnchanged
+                        } else {
+                            warn!("{stage_id}: intro changed: {id}");
+                            warn!("old: {old_intro}");
+                            warn!("new: {intro}");
+                            StagedStatus::IntroChanged
+                        };
+                    }
+                    #[cfg(not(feature = "sam"))]
+                    {
+                        status = StagedStatus::Updated;
+                    }
+                    ent.insert(illust);
+                }
+                Entry::Vacant(ent) => {
+                    ent.insert(illust);
+                }
+            }
+        } else {
             if let Some(old) = self.map.get_mut(&id) {
                 if !old.deleted {
                     old.deleted = true;
@@ -376,42 +415,6 @@ impl IllustIndex {
             );
             let r = self.map.insert(id, illust);
             assert!(r.is_none());
-        } else {
-            match self.map.entry(illust.data.id) {
-                Entry::Occupied(mut ent) => {
-                    let old = ent.get();
-                    if !stage.cache.is_empty() {
-                        if stage.cache.contains(&json) {
-                            // The exactly same data already exists in the map.
-                            return Ok(false);
-                        }
-                        trace!("{}: illust updated: {}", stage_id, id);
-                        trace!("old: {:?}", old.data);
-                        trace!("new: {:?}", illust.data);
-                    }
-                    #[cfg(feature = "sam")]
-                    {
-                        let old_intro = old.intro();
-                        let intro = illust.intro();
-                        status = if old_intro == intro {
-                            StagedStatus::IntroUnchanged
-                        } else {
-                            warn!("{}: intro changed: {}", stage_id, id);
-                            warn!("old: {}", old_intro);
-                            warn!("new: {}", intro);
-                            StagedStatus::IntroChanged
-                        };
-                    }
-                    #[cfg(not(feature = "sam"))]
-                    {
-                        status = StagedStatus::Updated;
-                    }
-                    ent.insert(illust);
-                }
-                Entry::Vacant(ent) => {
-                    ent.insert(illust);
-                }
-            }
         }
         stage.todo.push(StagedItem { id, json, status });
         Ok(status == StagedStatus::New)
@@ -436,25 +439,25 @@ impl IllustIndex {
         let mut sa_needs_dedup = false;
 
         #[cfg(feature = "sam")]
-        let intro_changed_ids = if !self.disable_select {
+        let intro_changed_ids = if self.disable_select {
+            Vec::new()
+        } else {
             stage
                 .iter()
                 .filter_map(|item| {
-                    if item.status != StagedStatus::IntroUnchanged {
+                    if item.status == StagedStatus::IntroUnchanged {
+                        None
+                    } else {
                         sa_needs_dedup |= item.status == StagedStatus::IntroChanged;
                         Some(item.id)
-                    } else {
-                        None
                     }
                 })
                 .collect_vec()
-        } else {
-            Vec::new()
         };
 
         let new_ids = IllustStage::new_ids(&stage).rev().collect_vec();
         let delta = new_ids.len();
-        info!("{}: committing {} illusts ({} new)", stage_id, cnt, delta);
+        info!("{stage_id}: committing {cnt} illusts ({delta} new)");
         if let Err(e) = self
             .store
             .upsert(stage.iter().map(|item| (&item.json, item.id)))
@@ -465,7 +468,7 @@ impl IllustIndex {
             return 0;
         }
 
-        the_stage.cache = BTreeSet::from_iter(stage.into_iter().map(|item| item.json));
+        the_stage.cache = stage.into_iter().map(|item| item.json).collect();
         self.ids.extend(new_ids);
 
         if !self.disable_select {
@@ -510,10 +513,7 @@ impl IllustIndex {
             self.map.remove(&id);
         }
         let delta = n - self.ids.len();
-        error!(
-            "{}: rolled back {} illusts (out of {})",
-            stage_id, delta, cnt
-        );
+        error!("{stage_id}: rolled back {delta} illusts (out of {cnt})");
         // Callers must ensure ids from different stages don't overlap
         delta
     }

@@ -292,6 +292,6 @@ impl Index {
             }
         } else {
             self.minor = Some(SA::from(data.into_iter()));
-        };
+        }
     }
 }
