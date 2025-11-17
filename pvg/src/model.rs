@@ -465,6 +465,13 @@ impl IllustIndex {
         {
             critical!("FAILED TO STORE {} ({} new) ILLUSTS: {:?}", cnt, delta, e);
             self.do_rollback(new_ids.into_iter(), stage_id, cnt);
+
+            // Clear the index to alert.
+            #[cfg(feature = "sam")]
+            if !self.disable_select {
+                self.sa = SAIndex::default();
+            }
+
             return 0;
         }
 
