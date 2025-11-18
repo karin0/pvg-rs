@@ -825,7 +825,7 @@ struct SelectedIllust<'a>(
     Vec<&'a str>,
     Vec<SelectedPage<'a>>,
     &'a str,
-    u16,
+    u8,
 );
 
 #[derive(Debug, Serialize)]
@@ -845,14 +845,16 @@ impl Pvg {
 
         let now = Instant::now();
         let index = self.index.read().await;
-        let r = Self::_select(index.select(
+        let r = index.select(
             &filters,
             if let Some(bans) = &ban_filters {
                 bans
             } else {
                 &[]
             },
-        ));
+        );
+
+        let r = Self::_select(&index, r);
 
         let now2 = Instant::now();
         let t = (now2 - now).as_millis();
@@ -874,12 +876,13 @@ impl Pvg {
         Ok(r)
     }
 
-    fn _select<'a>(index: impl DoubleEndedIterator<Item = &'a Illust>) -> Vec<SelectedIllust<'a>> {
-        // TODO: do this all sync can block for long.
-        index
-            .rev()
+    fn _select<'a>(
+        index: &'a IllustIndex,
+        r: impl DoubleEndedIterator<Item = &'a Illust>,
+    ) -> Vec<SelectedIllust<'a>> {
+        r.rev()
             .map(|illust| {
-                let tags: Vec<&str> = illust.data.tags.iter().map(|t| t.name.as_ref()).collect();
+                let tags: Vec<&str> = index.tags(illust).collect();
                 let mut curr_w = 0;
                 let mut curr_h = 0;
                 let pages: Vec<SelectedPage> = illust
@@ -903,8 +906,8 @@ impl Pvg {
                 SelectedIllust(
                     i.id,
                     &i.title,
-                    i.user.id,
-                    &i.user.name,
+                    i.user_id,
+                    index.user_name(illust),
                     tags,
                     pages,
                     &i.create_date,

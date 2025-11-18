@@ -33,6 +33,7 @@ nix = { version = "0.30", features = ["fs"], optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
 unicode-normalization = "0.1"
 lz4 = "1"
+string-interner = "0.19"
 
 dhat = { version = "0.3", optional = true }
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
