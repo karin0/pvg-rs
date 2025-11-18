@@ -1,4 +1,5 @@
 use crate::critical;
+use crate::illust::{IllustData, IllustService};
 use crate::store::Store;
 use crate::util::normalized;
 use anyhow::{Context, Result, bail};
@@ -59,7 +60,7 @@ pub struct Page {
 
 #[derive(Debug, Clone)]
 pub struct Illust {
-    pub(crate) data: api::Illust,
+    pub(crate) data: IllustData,
     pub(crate) pages: Vec<Page>,
     deleted: bool,
 }
@@ -103,6 +104,7 @@ impl IllustStage {
 pub struct IllustIndex {
     store: Store,
     pub map: HashMap<IllustId, Illust>,
+    pub srv: IllustService,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     stages: [IllustStage; 2],
     #[cfg(feature = "sam")]
@@ -119,11 +121,11 @@ impl Page {
     }
 }
 
-fn make_intro(data: &api::Illust) -> String {
-    let mut s = format!("{}\\{}", data.title, data.user.name);
-    for t in &data.tags {
+fn make_intro(data: &IllustData, srv: &IllustService) -> String {
+    let mut s = format!("{}\\{}", data.title, srv.get_user_name(data));
+    for t in srv.get_tags(data) {
         s.push('\\');
-        s.push_str(&t.name);
+        s.push_str(t);
     }
     s = normalized(&s);
     s.push_str("\\$s");
@@ -151,17 +153,12 @@ fn make_intro(data: &api::Illust) -> String {
 }
 
 impl Illust {
-    fn from_bytes(raw_json: &[u8]) -> Result<Self> {
+    fn from_bytes(raw_json: &[u8], srv: &mut IllustService, new: bool) -> Result<Self> {
         let data = serde_json::from_slice::<api::Illust>(raw_json)?;
-        Self::new(data)
+        Self::from_raw(data, srv, new)
     }
 
-    fn from_value(raw_json: JsonValue) -> Result<Self> {
-        let data = serde_json::from_value::<api::Illust>(raw_json)?;
-        Self::new(data)
-    }
-
-    fn new(data: api::Illust) -> Result<Self> {
+    fn from_raw(data: api::Illust, srv: &mut IllustService, new: bool) -> Result<Self> {
         let pages = if data.page_count == 1 {
             vec![Page::new(
                 data.meta_single_page
@@ -186,14 +183,14 @@ impl Illust {
         };
 
         Ok(Self {
-            data,
+            data: srv.resolve(data, new),
             pages,
             deleted: false,
         })
     }
 
-    fn intro(&self) -> String {
-        make_intro(&self.data)
+    fn intro(&self, srv: &IllustService) -> String {
+        make_intro(&self.data, srv)
     }
 }
 
@@ -226,12 +223,13 @@ impl IllustIndex {
         let size = illusts.iter().map(Vec::len).sum::<usize>();
 
         let mut ids = Vec::with_capacity(illusts.len());
+        let mut srv = IllustService::new();
 
         let map = illusts
             .into_iter()
             .map(|data| {
                 // FIXME: do not unwrap
-                let o = Illust::from_bytes(&data).unwrap();
+                let o = Illust::from_bytes(&data, &mut srv, true).unwrap();
 
                 ids.push(o.data.id);
 
@@ -245,7 +243,7 @@ impl IllustIndex {
         let sa = if disable_select {
             SAIndex::default()
         } else {
-            SAIndex::new(ids.iter().map(|id| (*id, map[id].intro())))
+            SAIndex::new(ids.iter().map(|id| (*id, map[id].intro(&srv))))
         };
 
         #[cfg(feature = "sam")]
@@ -260,6 +258,7 @@ impl IllustIndex {
             store,
             map,
             ids,
+            srv,
             stages: [IllustStage::default(), IllustStage::default()],
             #[cfg(feature = "sam")]
             sa,
@@ -346,7 +345,10 @@ impl IllustIndex {
         // (pixiv escapes unicode chars). Feature `preserve_order` is enforced here.
         let json = serde_json::to_vec(&raw)?;
 
-        let mut illust = Illust::from_value(raw)?;
+        let data = serde_json::from_value::<api::Illust>(raw)?;
+        let id = data.id;
+        let mut illust = Illust::from_raw(data, &mut self.srv, !self.map.contains_key(&id))?;
+
         trace!(
             "staging {} {} {}",
             stage_id, illust.data.id, illust.data.title
@@ -369,8 +371,8 @@ impl IllustIndex {
                     }
                     #[cfg(feature = "sam")]
                     {
-                        let old_intro = old.intro();
-                        let intro = illust.intro();
+                        let old_intro = old.intro(&self.srv);
+                        let intro = illust.intro(&self.srv);
                         status = if old_intro == intro {
                             StagedStatus::IntroUnchanged
                         } else {
@@ -397,12 +399,16 @@ impl IllustIndex {
                     if old.data.visible {
                         warn!(
                             "{} ({} - {}) is deleted from upstream, which has luckily been indexed.",
-                            id, old.data.title, old.data.user.name
+                            id,
+                            old.data.title,
+                            self.srv.get_original_user_name(&old.data)
                         );
                     } else {
                         warn!(
                             "{} ({} - {}) is deleted from upstream, which sadly hadn't been indexed.",
-                            id, old.data.title, old.data.user.name
+                            id,
+                            old.data.title,
+                            self.srv.get_original_user_name(&old.data)
                         );
                     }
                 }
@@ -411,7 +417,9 @@ impl IllustIndex {
             illust.deleted = true;
             warn!(
                 "{} ({} - {}) is deleted from upstream, which sadly hasn't been indexed.",
-                id, illust.data.title, illust.data.user.name
+                id,
+                illust.data.title,
+                self.srv.get_original_user_name(&illust.data)
             );
             let r = self.map.insert(id, illust);
             assert!(r.is_none());
@@ -488,7 +496,7 @@ impl IllustIndex {
                         .iter()
                         .map(|iid| {
                             let o = &self.map[iid];
-                            (*iid, o.intro())
+                            (*iid, o.intro(&self.srv))
                         })
                         .collect_vec(),
                     sa_needs_dedup,
@@ -545,5 +553,13 @@ impl IllustIndex {
             error!("not built with sam feature, select is disabled");
             Box::new(std::iter::empty())
         }
+    }
+
+    pub fn tags<'a>(&'a self, illust: &'a Illust) -> impl Iterator<Item = &'a str> {
+        self.srv.get_tags(&illust.data)
+    }
+
+    pub fn user_name(&self, illust: &Illust) -> &str {
+        self.srv.get_user_name(&illust.data)
     }
 }

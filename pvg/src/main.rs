@@ -2,6 +2,7 @@ mod config;
 mod core;
 mod disk_lru;
 mod download;
+mod illust;
 mod model;
 mod store;
 mod upscale;
