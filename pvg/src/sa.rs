@@ -17,21 +17,35 @@ impl SA {
         let mut indices = iter
             .clone()
             .enumerate()
-            .flat_map(|(idx, (_, s))| std::iter::repeat_n(idx as Pos, s.as_ref().len()))
+            .flat_map(|(idx, (_, s))| {
+                std::iter::repeat_n(idx as Pos, s.as_ref().len() + if idx == 0 { 0 } else { 1 })
+            })
             .collect_vec();
+        indices.shrink_to_fit();
 
-        let size = iter.clone().map(|(_, s)| s.as_ref().len()).sum();
+        let size = iter
+            .clone()
+            .map(|(_, s)| s.as_ref().len() + 1)
+            .sum::<usize>()
+            .saturating_sub(1);
         let mut full = String::with_capacity(size);
+        let mut first = true;
         let data = iter
             .map(|(k, s)| {
+                let s = s.as_ref();
+                assert!(!s.is_empty());
+                if first {
+                    first = false;
+                } else {
+                    full.push('\\');
+                }
                 let start = full.len() as Pos;
-                full.push_str(s.as_ref());
+                full.push_str(s);
                 (k, start)
             })
             .collect_vec();
         let sa = SuffixTable::new(full);
 
-        indices.shrink_to_fit();
         SA { sa, indices, data }
     }
 
@@ -59,7 +73,7 @@ impl SA {
         let full = self.sa.text();
         (
             if idx + 1 < self.len() {
-                &full[start as usize..data[idx + 1].1 as usize]
+                &full[start as usize..(data[idx + 1].1 - 1) as usize]
             } else {
                 &full[start as usize..]
             },
@@ -73,8 +87,8 @@ impl SA {
             .iter()
             .circular_tuple_windows()
             .map(|(&(k, p1), &(_, p2))| {
-                if p1 <= p2 {
-                    (k, &full[p1 as usize..p2 as usize])
+                if p1 < p2 {
+                    (k, &full[p1 as usize..(p2 - 1) as usize])
                 } else {
                     (k, &full[p1 as usize..])
                 }
