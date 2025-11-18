@@ -20,4 +20,7 @@ pub fn normalized(s: &str) -> String {
         .collect::<String>()
         .nfkc()
         .collect::<String>()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
 }
