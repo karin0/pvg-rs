@@ -1,6 +1,23 @@
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use suffix::SuffixTable;
+
+fn binary_search<T, F>(xs: &[T], mut pred: F) -> usize
+where
+    F: FnMut(&T) -> bool,
+{
+    let (mut left, mut right) = (0, xs.len());
+    while left < right {
+        let mid = usize::midpoint(left, right);
+        if pred(&xs[mid]) {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    left
+}
 
 type Key = pixiv::IllustId;
 type Pos = u32;
@@ -12,17 +29,10 @@ struct SA {
     data: Vec<(Key, Pos)>, // len = number of strings
 }
 
+static STAT: AtomicU32 = AtomicU32::new(0);
+
 impl SA {
     pub fn from<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(iter: I) -> SA {
-        let mut indices = iter
-            .clone()
-            .enumerate()
-            .flat_map(|(idx, (_, s))| {
-                std::iter::repeat_n(idx as Pos, s.as_ref().len() + if idx == 0 { 0 } else { 1 })
-            })
-            .collect_vec();
-        indices.shrink_to_fit();
-
         let size = iter
             .clone()
             .map(|(_, s)| s.as_ref().len() + 1)
@@ -31,6 +41,7 @@ impl SA {
         let mut full = String::with_capacity(size);
         let mut first = true;
         let data = iter
+            .clone()
             .map(|(k, s)| {
                 let s = s.as_ref();
                 assert!(!s.is_empty());
@@ -46,7 +57,48 @@ impl SA {
             .collect_vec();
         let sa = SuffixTable::new(full);
 
+        let indices = iter
+            .enumerate()
+            .flat_map(|(idx, (_, s))| {
+                std::iter::repeat_n(idx as Pos, s.as_ref().len() + usize::from(idx != 0))
+            })
+            .collect_vec();
+
+        let mut indices = sa
+            .table()
+            .iter()
+            .map(|&p| indices[p as usize])
+            .collect_vec();
+
+        indices.shrink_to_fit();
+
         SA { sa, indices, data }
+    }
+
+    fn indices(&self, query: &str) -> &[Pos] {
+        let sa = &self.sa;
+        let (text, query) = (sa.text().as_bytes(), query.as_bytes());
+
+        if text.is_empty()
+            || query.is_empty()
+            || (query < sa.suffix_bytes(0) && !sa.suffix_bytes(0).starts_with(query))
+            || query > sa.suffix_bytes(sa.len() - 1)
+        {
+            return &[];
+        }
+
+        let table = sa.table();
+        let start = binary_search(table, |&sufi| query <= &text[sufi as usize..]);
+        let end = start
+            + binary_search(&table[start..], |&sufi| {
+                !text[sufi as usize..].starts_with(query)
+            });
+
+        if start >= end {
+            &[]
+        } else {
+            &self.indices[start..end]
+        }
     }
 
     fn len(&self) -> usize {
@@ -99,20 +151,32 @@ impl SA {
         self.iter().collect_vec()
     }
 
-    fn single_select<'a>(
-        &'a self,
-        pattern: &str,
-        ban_filters: &'a [String],
-    ) -> impl Iterator<Item = Key> + 'a {
-        self.sa
-            .positions(pattern)
+    fn single_select<'a>(&'a self, pattern: &str) -> impl Iterator<Item = Key> + 'a {
+        self.indices(pattern)
             .iter()
             .sorted_unstable()
-            .map(|i| self.indices[*i as usize])
+            .dedup()
+            .map(move |idx| self.data[*idx as usize].0)
+    }
+
+    fn heuristic_select<'a>(
+        &'a self,
+        min_idx: usize,
+        min_indices: &'a [Pos],
+        filters: &'a [String],
+    ) -> impl Iterator<Item = Key> + 'a {
+        min_indices
+            .iter()
+            .sorted_unstable()
             .dedup()
             .filter_map(move |idx| {
-                let (s, key) = self.resolve(idx);
-                if ban_filters.iter().all(|tag| !s.contains(tag)) {
+                let (s, key) = self.resolve(*idx);
+                if filters.iter().enumerate().all(|(p, tag)| {
+                    p == min_idx || {
+                        STAT.fetch_add(s.len() as u32, Ordering::Relaxed);
+                        s.contains(tag)
+                    }
+                }) {
                     Some(key)
                 } else {
                     None
@@ -120,34 +184,46 @@ impl SA {
             })
     }
 
-    fn _select_best<'a>(
+    fn inverted_select<'a>(
         &'a self,
-        filters: &'a [String],
+        all_indices: Vec<&'a [Pos]>,
+        min_idx: usize,
+        min_indices: &'a [Pos],
         ban_filters: &'a [String],
-    ) -> impl Iterator<Item = Key> + 'a {
-        let (i, a) = filters
-            .iter()
-            .map(|patt| self.sa.positions(patt))
-            .enumerate()
-            .min_by_key(|(_, poses)| poses.len())
-            .unwrap();
-        a.iter()
-            .sorted_unstable()
-            .map(|p| self.indices[*p as usize])
-            .dedup()
-            .filter_map(move |idx| {
-                let (s, key) = self.resolve(idx);
-                if ban_filters.iter().all(|tag| !s.contains(tag))
-                    && filters
-                        .iter()
-                        .enumerate()
-                        .all(|(p, tag)| p == i || s.contains(tag))
-                {
-                    Some(key)
-                } else {
-                    None
+    ) -> Box<dyn Iterator<Item = Key> + 'a> {
+        let mut s = min_indices.iter().copied().collect::<HashSet<Pos>>();
+        let mut new = HashSet::new();
+
+        for (p, indices) in all_indices.into_iter().enumerate() {
+            debug!("candidates: {}", s.len());
+            STAT.fetch_add(indices.len() as u32, Ordering::Relaxed);
+            if p == min_idx {
+                continue;
+            }
+            for &idx in indices {
+                if s.contains(&idx) {
+                    new.insert(idx);
                 }
-            })
+            }
+            if new.is_empty() {
+                return Box::new(std::iter::empty());
+            }
+            std::mem::swap(&mut s, &mut new);
+            new.clear();
+        }
+
+        for patt in ban_filters {
+            let indices = self.indices(patt);
+            STAT.fetch_add(indices.len() as u32, Ordering::Relaxed);
+            for idx in indices {
+                s.remove(idx);
+            }
+        }
+        Box::new(
+            s.into_iter()
+                .sorted_unstable()
+                .map(move |idx| self.data[idx as usize].0),
+        )
     }
 
     fn select<'a>(
@@ -156,16 +232,69 @@ impl SA {
         ban_filters: &'a [String],
     ) -> Box<dyn Iterator<Item = Key> + 'a> {
         match filters.len() {
-            0 => Box::new(self.iter().filter_map(move |(key, s)| {
-                if ban_filters.iter().all(|tag| !s.contains(tag)) {
-                    Some(key)
-                } else {
-                    None
+            0 => {
+                // Inverted selection is more suitable for negated filters.
+                let ban_idxs = ban_filters
+                    .iter()
+                    .flat_map(|patt| self.indices(patt))
+                    .collect::<HashSet<_>>();
+                STAT.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
+                return Box::new(self.iter().enumerate().filter_map(move |(idx, (key, _))| {
+                    if ban_idxs.contains(&(idx as Pos)) {
+                        None
+                    } else {
+                        Some(key)
+                    }
+                }));
+            }
+            1 => {
+                if ban_filters.is_empty() {
+                    return Box::new(self.single_select(&filters[0]));
                 }
-            })),
-            1 => Box::new(self.single_select(&filters[0], ban_filters)),
-            _ => Box::new(self._select_best(filters, ban_filters)),
+            }
+            _ => {}
         }
+
+        let all: Vec<&[Pos]> = filters
+            .iter()
+            .map(|patt| self.indices(patt))
+            .collect::<Vec<_>>();
+
+        let (p, a) = all
+            .iter()
+            .copied()
+            .enumerate()
+            .min_by_key(|(_, poses)| poses.len())
+            .unwrap();
+
+        let a_len = a.len();
+
+        if a_len == 0 {
+            return Box::new(std::iter::empty());
+        }
+
+        let sum_len = if log_enabled!(log::Level::Debug) {
+            let lens = all.iter().map(|v| v.len()).collect_vec();
+            let sum_len: usize = lens.iter().sum();
+            let c = a.len() as f64 / sum_len as f64;
+            debug!("indices lengths: {lens:?}, c = {c:.3}");
+            if !ban_filters.is_empty() {
+                return self.inverted_select(all, p, a, ban_filters);
+            }
+            sum_len
+        } else {
+            if !ban_filters.is_empty() {
+                return self.inverted_select(all, p, a, ban_filters);
+            }
+            all.iter().map(|v| v.len()).sum::<usize>()
+        };
+
+        // c >= 0.25
+        if a.len() * 4 >= sum_len {
+            return self.inverted_select(all, p, a, ban_filters);
+        }
+
+        Box::new(self.heuristic_select(p, a, filters))
     }
 }
 
@@ -222,6 +351,10 @@ impl Index {
             minor: None,
             dedup: false,
         }
+    }
+
+    pub fn stat() -> u32 {
+        STAT.swap(0, Ordering::Relaxed)
     }
 
     pub fn size(&self) -> usize {

@@ -111,13 +111,13 @@ impl IllustService {
     pub fn get_tags<'a>(&'a self, data: &'a IllustData) -> Box<dyn Iterator<Item = &'a str> + 'a> {
         let id = self.users[&data.user_id].max.0;
         let it = data.tags.iter().map(|&id| self.tags.resolve(id).unwrap());
-        if id != data.original_user_name {
+        if id == data.original_user_name {
+            Box::new(it)
+        } else {
             Box::new(
                 std::iter::once(self.user_names.resolve(data.original_user_name).unwrap())
                     .chain(it),
             )
-        } else {
-            Box::new(it)
         }
     }
 
