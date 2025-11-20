@@ -614,12 +614,12 @@ impl Pvg {
         Ok(r)
     }
 
-    async fn download_all_worker(&self, ids: &[IllustId]) -> Result<u32> {
+    async fn download_all_worker(&self, ids: &[IllustId]) -> Result<(u32, bool)> {
         let _ = self.download_all_lock.try_lock()?;
         let q = self.make_download_queue_from(ids).await;
 
-        // The caller saves the cache anyway.
-        self._download_all(q).await.map(|(n, _)| n)
+        // The caller is responsible for saving cache.
+        self._download_all(q).await
     }
 
     async fn _download_all(&self, q: Vec<(String, PathBuf)>) -> Result<(u32, bool)> {
@@ -928,13 +928,21 @@ impl Pvg {
     }
 
     async fn worker_body(&self) -> Result<()> {
-        let ids = self.quick_update_worker().await?;
+        let mut ids = self.quick_update_worker().await?;
+
+        // What were we forgetting to download?
         let mut todo = self.worker_to_download.lock().await;
+        let last_todo = !todo.is_empty();
+
         if todo.is_empty() {
             *todo = ids;
         } else {
-            warn!("worker: remaining {} illusts to download", todo.len());
+            let old_n = todo.len();
             todo.extend(ids);
+            warn!(
+                "worker: remaining {old_n} illusts to download (total {})",
+                todo.len()
+            );
         }
 
         if todo.is_empty() {
@@ -942,13 +950,24 @@ impl Pvg {
             return Ok(());
         }
 
-        // Allow user interruptions while downloading and resume later.
-        let ids = todo.clone();
+        #[allow(clippy::assigning_clones)]
+        {
+            ids = todo.clone();
+        }
+
+        // Dropping the lock, allowing interruptions while downloading and resume later.
         drop(todo);
 
-        if let Err(e) = self.download_all_worker(&ids).await {
-            error!("download_all_worker: {e}");
-        }
+        let dirty_cache = match self.download_all_worker(&ids).await {
+            Ok((n, dirty_404)) => {
+                debug!("worker: downloaded {n} illusts");
+                dirty_404 || last_todo
+            }
+            Err(e) => {
+                error!("download_all_worker: {e}");
+                last_todo
+            }
+        };
 
         // Clear them even if failed to download, as we never retry for now.
         // Some illusts just keep failing with 404/500.
@@ -957,7 +976,10 @@ impl Pvg {
             todo.clear();
         }
 
-        self.save_cache().await?;
+        if dirty_cache {
+            self.save_cache().await?;
+        }
+
         self.move_orphans().await;
         Ok(())
     }
