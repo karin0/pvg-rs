@@ -488,7 +488,7 @@ impl IllustIndex {
                         status = if old_intro == intro {
                             StagedStatus::IntroUnchanged
                         } else {
-                            warn!("{stage_id}: intro changed: {id}");
+                            warn!("{stage_id}: {id}: intro changed (tainting index):");
                             warn!("old: {old_intro}");
                             warn!("new: {intro}");
                             StagedStatus::IntroChanged

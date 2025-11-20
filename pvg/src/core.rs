@@ -319,7 +319,13 @@ impl Pvg {
             if n > 0 {
                 let s = a.clone().map(|i| i.to_string()).join(", ");
                 res.extend(a);
-                info!("{name}: {n} illusts: {s}");
+                let new = index.count_new(stage);
+                let level = if new > 0 {
+                    log::Level::Info
+                } else {
+                    log::Level::Debug
+                };
+                log!(level, "{name}: {n} illusts ({new} new): {s}");
             }
         }
         index.commit(stage).await;
@@ -639,7 +645,9 @@ impl Pvg {
         let n = futs.len();
         let mut cnt: u32 = 0;
         let mut cnt_fail: u32 = 0;
+        let mut tot_size: u64 = 0;
         let mut the_404 = vec![];
+        let t0 = Instant::now();
         while let Some((path, res)) = futs.next().await {
             cnt += 1;
             match res {
@@ -654,6 +662,7 @@ impl Pvg {
                     self.disk_lru
                         .write()
                         .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
+                    tot_size += size;
                 }
                 Err(e) => {
                     cnt_fail += 1;
@@ -666,6 +675,7 @@ impl Pvg {
                 }
             }
         }
+        let dt = t0.elapsed();
         drop(futs);
         let mut dirty_404 = false;
         if !the_404.is_empty() {
@@ -682,7 +692,11 @@ impl Pvg {
         if cnt_fail > 0 {
             bail!("failed to download {cnt_fail} pages out from {cnt}");
         }
-        info!("downloaded {cnt} pages");
+        info!(
+            "downloaded {cnt} pages ({} MiB in {dt:.3?}, {:.3} KiB/s)",
+            tot_size as f64 / 1024.0 / 1024.0,
+            tot_size as f64 / (dt.as_secs_f64() * 1024.0),
+        );
         Ok((cnt, dirty_404))
     }
 }
