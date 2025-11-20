@@ -35,6 +35,7 @@ trait RangeExt {
 }
 
 impl RangeExt for Range {
+    #[inline]
     fn len(&self) -> usize {
         (self.1 - self.0) as usize
     }
@@ -42,32 +43,9 @@ impl RangeExt for Range {
 
 struct SA {
     sa: SuffixTable<'static, 'static>,
-    indices: Vec<Idx>, // len = N, total length of all strings (in bytes)
-    data: Vec<Key>,    // len = V, number of strings
-    starts: Vec<Pos>,  // len = V
-    #[cfg(feature = "sa-inverted")]
-    occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
-    blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
-    block_size: Pos,
-}
-
-#[inline]
-fn iter_items<'a>(
-    full: &'a str,
-    starts: &'a [Pos],
-    data: &'a [Key],
-) -> impl Iterator<Item = Item<'a>> + 'a {
-    let strs = starts
-        .iter()
-        .circular_tuple_windows()
-        .map(move |(&p1, &p2)| {
-            if p1 < p2 {
-                &full[p1 as usize..(p2 - 1) as usize]
-            } else {
-                &full[p1 as usize..]
-            }
-        });
-    data.iter().copied().zip(strs)
+    data: Vec<Key>,   // len = V, number of strings
+    starts: Vec<Pos>, // len = V
+    indices: Indices,
 }
 
 struct SAInner {
@@ -77,8 +55,155 @@ struct SAInner {
 }
 
 impl SAInner {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
     fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
-        iter_items(&self.full, &self.starts, &self.data)
+        let full = &self.full;
+        let starts = &self.starts;
+        let data = &self.data;
+        let strs = starts
+            .iter()
+            .circular_tuple_windows()
+            .map(move |(&p1, &p2)| {
+                if p1 < p2 {
+                    &full[p1 as usize..(p2 - 1) as usize]
+                } else {
+                    &full[p1 as usize..]
+                }
+            });
+        data.iter().copied().zip(strs)
+    }
+}
+
+struct Indices {
+    inner: Vec<Idx>, // len = N, total length of all strings (in bytes)
+    #[cfg(feature = "sa-inverted")]
+    occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
+    blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
+    block_size: Pos,
+}
+
+impl Indices {
+    fn new<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(
+        iter: I,
+        v: Idx,
+        sa: &[Pos],
+    ) -> Indices {
+        let raw_indices = iter
+            .enumerate()
+            .flat_map(|(idx, (_, s))| {
+                std::iter::repeat_n(idx as Pos, s.as_ref().len() + usize::from(idx != 0))
+            })
+            .collect_vec();
+
+        let mut indices = sa.iter().map(|&p| raw_indices[p as usize]).collect_vec();
+        drop(raw_indices);
+        indices.shrink_to_fit();
+
+        #[cfg(feature = "sa-inverted")]
+        let occurrences = {
+            let mut occurrences: Vec<Vec<Pos>> = vec![Vec::new(); v as usize];
+            for (i, &idx) in indices.iter().enumerate() {
+                occurrences[idx as usize].push(i as Pos);
+            }
+            for occ in &mut occurrences {
+                occ.shrink_to_fit();
+            }
+            occurrences.shrink_to_fit();
+            occurrences
+        };
+
+        let n = indices.len() as Pos;
+        let (mut blocks, block_size) = if n > 0 {
+            let block_size = n.integer_sqrt().clamp(1, 10000);
+            let blocks = indices
+                .chunks(block_size as usize)
+                .map(|chunk| {
+                    let mut set = FixedBitSet::with_capacity(v as usize);
+                    for &idx in chunk {
+                        set.insert(idx as usize);
+                    }
+                    set
+                })
+                .collect_vec();
+
+            (blocks, block_size)
+        } else {
+            (Vec::new(), 0)
+        };
+        blocks.shrink_to_fit();
+
+        Indices {
+            inner: indices,
+            #[cfg(feature = "sa-inverted")]
+            occurrences,
+            blocks,
+            block_size,
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[inline]
+    fn by_range(&self, range: Range) -> &[Idx] {
+        &self.inner[range.0 as usize..range.1 as usize]
+    }
+
+    #[inline]
+    fn join_blocks(&self, l: Pos, r: Pos) -> FixedBitSet {
+        let b = self.block_size;
+        let start = l.div_ceil(b);
+        let end = r / b;
+        let mut res = FixedBitSet::with_capacity(self.len());
+
+        let bound = r.min(start * b);
+        if l < bound {
+            for &idx in &self.inner[l as usize..bound as usize] {
+                res.insert(idx as usize);
+            }
+        }
+        if r <= bound {
+            return res;
+        }
+        let bound = l.max(end * b);
+        if bound < r {
+            for &idx in &self.inner[bound as usize..r as usize] {
+                res.insert(idx as usize);
+            }
+        }
+        if start < end {
+            let blocks = end - start;
+            STAT.fetch_add(blocks, Ordering::Relaxed);
+            debug!("joining {blocks} blocks");
+            for b in &self.blocks[start as usize..end as usize] {
+                res.union_with(b);
+            }
+        }
+
+        res
+    }
+
+    #[cfg(feature = "sa-inverted")]
+    fn occured_in_range(&self, idx: Idx, range: Range) -> bool {
+        let occurences = &self.occurrences[idx as usize];
+        if let Err(bound) = occurences.binary_search(&range.0) {
+            occurences.get(bound).is_some_and(|&p| p < range.1)
+        } else {
+            true
+        }
+    }
+}
+
+impl std::ops::Index<Range> for Indices {
+    type Output = [Idx];
+
+    fn index(&self, range: Range) -> &Self::Output {
+        self.by_range(range)
     }
 }
 
@@ -95,7 +220,7 @@ impl SA {
             + self.data.len()
                 * (size_of::<Key>()
                     + size_of::<Pos>()
-                    + self.blocks.len() / size_of::<fixedbitset::Block>())
+                    + self.indices.blocks.len() / size_of::<fixedbitset::Block>())
             + size_of::<Self>();
 
         #[cfg(feature = "sa-bench")]
@@ -108,9 +233,9 @@ impl SA {
         let n = self.size();
         let v = self.len();
         let sa = (n * size_of::<Pos>()) >> 10;
-        let blks = (self.blocks.len() * v / size_of::<fixedbitset::Block>()) >> 10;
+        let blks = (self.indices.blocks.len() * v / size_of::<fixedbitset::Block>()) >> 10;
         let tot = self.memory() >> 10;
-        let b = self.block_size;
+        let b = self.indices.block_size;
         let d = if v > 0 { n / v } else { 0 };
         debug!(
             "SA: sa=indices={sa}, blocks={blks}, total={tot} KiB (n={n}={v}*{d}, b={b}) in {dt:?}"
@@ -119,7 +244,7 @@ impl SA {
 
     pub fn from<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(iter: I) -> SA {
         let t0 = std::time::Instant::now();
-        let size = iter
+        let size: usize = iter
             .clone()
             .map(|(_, s)| s.as_ref().len() + 1)
             .sum::<usize>()
@@ -148,66 +273,16 @@ impl SA {
         let sa = SuffixTable::new(full);
         debug!("SA constructed in {:?}", t1.elapsed());
 
-        let indices = iter
-            .enumerate()
-            .flat_map(|(idx, (_, s))| {
-                std::iter::repeat_n(idx as Pos, s.as_ref().len() + usize::from(idx != 0))
-            })
-            .collect_vec();
-
-        let mut indices = sa
-            .table()
-            .iter()
-            .map(|&p| indices[p as usize])
-            .collect_vec();
-        indices.shrink_to_fit();
-
-        #[cfg(feature = "sa-inverted")]
-        let occurrences = {
-            let mut occurrences: Vec<Vec<Pos>> = vec![Vec::new(); data.len()];
-            for (i, &idx) in indices.iter().enumerate() {
-                occurrences[idx as usize].push(i as Pos);
-            }
-            for occ in &mut occurrences {
-                occ.shrink_to_fit();
-            }
-            occurrences.shrink_to_fit();
-            occurrences
-        };
-
-        let n = indices.len() as Idx;
-        let (mut blocks, block_size) = if n > 0 {
-            let block_size = n.integer_sqrt().clamp(1, 10000);
-            let v = data.len();
-            let blocks = indices
-                .chunks(block_size as usize)
-                .map(|chunk| {
-                    let mut set = FixedBitSet::with_capacity(v);
-                    for &idx in chunk {
-                        set.insert(idx as usize);
-                    }
-                    set
-                })
-                .collect_vec();
-
-            (blocks, block_size)
-        } else {
-            (Vec::new(), 0)
-        };
-        blocks.shrink_to_fit();
+        let indices = Indices::new(iter, data.len() as Idx, sa.table());
 
         let r = SA {
             sa,
-            indices,
             data,
             starts,
-            #[cfg(feature = "sa-inverted")]
-            occurrences,
-            blocks,
-            block_size,
+            indices,
         };
 
-        if n > 0 && log_enabled!(log::Level::Debug) {
+        if size > 0 && log_enabled!(log::Level::Debug) {
             r.stat(t0.elapsed());
         }
 
@@ -241,22 +316,22 @@ impl SA {
         }
     }
 
-    fn indices_from_range(&self, range: Range) -> &[Idx] {
-        &self.indices[range.0 as usize..range.1 as usize]
-    }
-
+    #[inline]
     fn indices(&self, pattern: &str) -> &[Idx] {
-        self.indices_from_range(self.indices_range(pattern))
+        self.indices.by_range(self.indices_range(pattern))
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.data.len()
     }
 
+    #[inline]
     fn size(&self) -> usize {
         self.indices.len()
     }
 
+    #[inline]
     fn resolve(&self, idx: u32) -> (&str, Key) {
         let idx = idx as usize;
         let starts = &self.starts;
@@ -271,10 +346,7 @@ impl SA {
         )
     }
 
-    fn iter(&self) -> impl Iterator<Item = Item<'_>> {
-        iter_items(self.sa.text(), &self.starts, &self.data)
-    }
-
+    #[inline]
     fn into_inner(self) -> SAInner {
         let (full, _) = self.sa.into_parts();
         SAInner {
@@ -323,16 +395,6 @@ impl SA {
     }
 
     #[cfg(feature = "sa-inverted")]
-    fn occured_in_range(&self, idx: Idx, range: Range) -> bool {
-        let occurences = &self.occurrences[idx as usize];
-        if let Err(bound) = occurences.binary_search(&range.0) {
-            occurences.get(bound).is_some_and(|&p| p < range.1)
-        } else {
-            true
-        }
-    }
-
-    #[cfg(feature = "sa-inverted")]
     fn binary_select<'a>(
         &'a self,
         all_ranges: Vec<Range>,
@@ -341,6 +403,7 @@ impl SA {
         ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
         let ban_ranges = self.query_ranges(ban_filters).collect_vec();
+        let indices = &self.indices;
         min_indices
             .iter()
             .sorted_unstable()
@@ -350,10 +413,10 @@ impl SA {
                 if all_ranges
                     .iter()
                     .enumerate()
-                    .all(|(p, &range)| p as Idx == min_idx || self.occured_in_range(idx, range))
+                    .all(|(p, &range)| p as Idx == min_idx || indices.occured_in_range(idx, range))
                     && !ban_ranges
                         .iter()
-                        .any(|&range| self.occured_in_range(idx, range))
+                        .any(|&range| indices.occured_in_range(idx, range))
                 {
                     Some(self.data[idx as usize])
                 } else {
@@ -379,7 +442,7 @@ impl SA {
             if p as Idx == min_idx {
                 continue;
             }
-            let indices = &self.indices[range.0 as usize..range.1 as usize];
+            let indices = &self.indices[range];
             for &idx in indices {
                 if s.contains(&idx) {
                     new.insert(idx);
@@ -417,46 +480,13 @@ impl SA {
             .flat_map(|patt| self.indices(patt))
             .collect::<HashSet<_>>();
         STAT.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
-        self.iter().enumerate().filter_map(move |(idx, (key, _))| {
+        self.data.iter().enumerate().filter_map(move |(idx, &key)| {
             if ban_idxs.contains(&(idx as Pos)) {
                 None
             } else {
                 Some(key)
             }
         })
-    }
-
-    fn join_blocks(&self, l: Pos, r: Pos) -> FixedBitSet {
-        let b = self.block_size;
-        let start = l.div_ceil(b);
-        let end = r / b;
-        let mut res = FixedBitSet::with_capacity(self.len());
-
-        let bound = r.min(start * b);
-        if l < bound {
-            for &idx in &self.indices[l as usize..bound as usize] {
-                res.insert(idx as usize);
-            }
-        }
-        if r <= bound {
-            return res;
-        }
-        let bound = l.max(end * b);
-        if bound < r {
-            for &idx in &self.indices[bound as usize..r as usize] {
-                res.insert(idx as usize);
-            }
-        }
-        if start < end {
-            let blocks = end - start;
-            STAT.fetch_add(blocks, Ordering::Relaxed);
-            debug!("joining {blocks} blocks");
-            for b in &self.blocks[start as usize..end as usize] {
-                res.union_with(b);
-            }
-        }
-
-        res
     }
 
     fn block_select(
@@ -468,15 +498,15 @@ impl SA {
         let mut res = FixedBitSet::with_capacity(v);
         res.insert_range(0..v);
         for (l, r) in ranges {
-            res.intersect_with(&self.join_blocks(l, r));
+            res.intersect_with(&self.indices.join_blocks(l, r));
         }
         for f in ban_filters {
             let (l, r) = self.indices_range(f);
-            res.difference_with(&self.join_blocks(l, r));
+            res.difference_with(&self.indices.join_blocks(l, r));
         }
         res.ones()
             .map(|idx| self.data[idx])
-            .collect::<Vec<_>>()
+            .collect_vec()
             .into_iter()
     }
 
@@ -487,10 +517,10 @@ impl SA {
         let v = self.len();
         let mut set = FixedBitSet::with_capacity(v);
         for (l, r) in ban_ranges {
-            set.union_with(&self.join_blocks(l, r));
+            set.union_with(&self.indices.join_blocks(l, r));
         }
-        self.iter().enumerate().filter_map(
-            move |(idx, (key, _))| {
+        self.data.iter().enumerate().filter_map(
+            move |(idx, &key)| {
                 if set.contains(idx) { None } else { Some(key) }
             },
         )
@@ -506,13 +536,13 @@ impl SA {
         let mut s = BTreeSet::new();
         s.extend(0..self.len() as Pos);
         for range in ranges {
-            let indices = self.indices_from_range(range);
+            let indices = &self.indices[range];
             let t = indices.iter().copied().collect::<BTreeSet<_>>();
             STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.intersection(&t).copied().collect();
         }
         for range in ban_ranges {
-            let indices = self.indices_from_range(range);
+            let indices = &self.indices[range];
             let t: BTreeSet<u32> = indices.iter().copied().collect::<BTreeSet<_>>();
             STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.difference(&t).copied().collect();
@@ -540,7 +570,7 @@ impl SA {
             );
         }
 
-        if self.block_size == 0 {
+        if self.size() == 0 {
             return Box::new(std::iter::empty());
         }
 
@@ -587,7 +617,7 @@ impl SA {
             return Box::new(std::iter::empty());
         }
 
-        let min_indices = self.indices_from_range(min);
+        let min_indices = &self.indices[min];
 
         #[cfg(feature = "sa-bench")]
         if flags == 0x1 {
@@ -655,9 +685,8 @@ impl Dedup {
                 out[idx] = item;
             }
             Entry::Vacant(ent) => {
-                let idx = out.len() as Pos;
+                ent.insert(out.len() as Pos);
                 out.push(item);
-                ent.insert(idx);
             }
         }
     }
@@ -746,7 +775,7 @@ impl Index {
             let data = data.iter().map(|(k, s)| (*k, s.as_str()));
             if (minor.len() + data.len()) * 16 > self.major.len() {
                 warn!(
-                    "Merging SA indices: major={}, minor={}, new={}",
+                    " SA indices: major={}, minor={}, new={}",
                     self.major.len(),
                     minor.len(),
                     data.len()
@@ -754,12 +783,16 @@ impl Index {
 
                 // Drop the old indices before reconstruction.
                 let major = std::mem::take(&mut self.major).into_inner();
+                let minor = minor.into_inner();
 
                 let mut combined = major.iter().collect_vec();
                 combined.reserve(minor.len() + len);
+
+                let minor = minor.iter();
+
                 if self.dedup {
                     let mut dedup = Dedup::default();
-                    dedup.extend(&mut combined, minor.iter());
+                    dedup.extend(&mut combined, minor);
                     if dup {
                         dedup.extend(&mut combined, data);
                     } else {
@@ -767,7 +800,7 @@ impl Index {
                     }
                     self.dedup = false;
                 } else {
-                    combined.extend(minor.iter());
+                    combined.extend(minor);
                     extend(&mut combined, data);
                 }
                 self.major = SA::from(combined.into_iter());
