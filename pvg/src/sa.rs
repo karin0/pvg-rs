@@ -51,6 +51,37 @@ struct SA {
     block_size: Pos,
 }
 
+#[inline]
+fn iter_items<'a>(
+    full: &'a str,
+    starts: &'a [Pos],
+    data: &'a [Key],
+) -> impl Iterator<Item = Item<'a>> + 'a {
+    let strs = starts
+        .iter()
+        .circular_tuple_windows()
+        .map(move |(&p1, &p2)| {
+            if p1 < p2 {
+                &full[p1 as usize..(p2 - 1) as usize]
+            } else {
+                &full[p1 as usize..]
+            }
+        });
+    data.iter().copied().zip(strs)
+}
+
+struct SAInner {
+    full: String,
+    starts: Vec<Pos>,
+    data: Vec<Key>,
+}
+
+impl SAInner {
+    fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
+        iter_items(&self.full, &self.starts, &self.data)
+    }
+}
+
 #[cfg(feature = "sa-bench")]
 static FLAGS: AtomicU32 = AtomicU32::new(0);
 
@@ -241,23 +272,16 @@ impl SA {
     }
 
     fn iter(&self) -> impl Iterator<Item = Item<'_>> {
-        let full = self.sa.text();
-        let strs = self
-            .starts
-            .iter()
-            .circular_tuple_windows()
-            .map(|(&p1, &p2)| {
-                if p1 < p2 {
-                    &full[p1 as usize..(p2 - 1) as usize]
-                } else {
-                    &full[p1 as usize..]
-                }
-            });
-        self.data.iter().copied().zip(strs)
+        iter_items(self.sa.text(), &self.starts, &self.data)
     }
 
-    fn items(&self) -> Vec<Item<'_>> {
-        self.iter().collect_vec()
+    fn into_inner(self) -> SAInner {
+        let (full, _) = self.sa.into_parts();
+        SAInner {
+            full: full.to_string(),
+            starts: self.starts,
+            data: self.data,
+        }
     }
 
     fn single_select<'a>(&'a self, pattern: &str) -> impl Iterator<Item = Key> + 'a {
@@ -727,7 +751,11 @@ impl Index {
                     minor.len(),
                     data.len()
                 );
-                let mut combined = self.major.items();
+
+                // Drop the old indices before reconstruction.
+                let major = std::mem::take(&mut self.major).into_inner();
+
+                let mut combined = major.iter().collect_vec();
                 combined.reserve(minor.len() + len);
                 if self.dedup {
                     let mut dedup = Dedup::default();
@@ -745,8 +773,8 @@ impl Index {
                 self.major = SA::from(combined.into_iter());
                 self.minor = None;
             } else {
-                // let mut combined = minor.data;
-                let mut combined = minor.items();
+                let minor = minor.into_inner();
+                let mut combined = minor.iter().collect_vec();
                 combined.reserve(len);
                 if dup {
                     let mut dedup = Dedup::default();
