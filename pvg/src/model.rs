@@ -1,5 +1,6 @@
 use crate::critical;
 use crate::illust::{IllustData, IllustService};
+use crate::sa::Query;
 use crate::store::Store;
 use crate::util::normalized;
 use anyhow::{Context, Result, bail};
@@ -544,6 +545,14 @@ impl IllustIndex {
         self.stages[stage_id].todo.iter().map(|item| item.id)
     }
 
+    pub fn count_new(&self, stage_id: usize) -> usize {
+        self.stages[stage_id]
+            .todo
+            .iter()
+            .filter(|item| item.status == StagedStatus::New)
+            .count()
+    }
+
     // The staged illusts are already applied to `self.map``, we commit them to
     // `self.ids` and the store here.
     pub async fn commit(&mut self, stage_id: usize) -> usize {
@@ -669,9 +678,9 @@ impl IllustIndex {
         delta
     }
 
-    fn do_select(&self, kind: u32, filters: &[String], ban_filters: &[String]) -> Vec<IllustId> {
+    fn do_select(&self, kind: u32, query: Query) -> Vec<IllustId> {
         let t0 = Instant::now();
-        let res = self.sa.select(filters, ban_filters);
+        let res = self.sa.select(query);
         let dt = t0.elapsed();
         let st = SAIndex::stats();
         info!(
@@ -690,11 +699,13 @@ impl IllustIndex {
         if filters.is_empty() && ban_filters.is_empty() {
             return Box::new(self.iter());
         }
+        let query = Query::new(filters, ban_filters);
+
         #[cfg(feature = "sam")]
         {
             #[cfg(feature = "sa-bench")]
             SAIndex::set_flags(0);
-            let ans = self.do_select(0, filters, ban_filters);
+            let ans = self.do_select(0, query);
 
             #[cfg(feature = "sa-bench")]
             {
@@ -702,7 +713,7 @@ impl IllustIndex {
                 let t0 = Instant::now();
                 for kind in 0..5 {
                     SAIndex::set_flags(kind << 1 | 1);
-                    self.sa.select(filters, ban_filters);
+                    self.sa.select(query);
                     SAIndex::stats();
                 }
                 let dt = t0.elapsed();
@@ -718,7 +729,8 @@ impl IllustIndex {
             #[cfg(feature = "sa-bench")]
             for kind in 0..5 {
                 SAIndex::set_flags(kind << 1 | 1);
-                let res = self.do_select(kind + 1, filters, ban_filters);
+
+                let res = self.do_select(kind + 1, query);
 
                 if res != ans {
                     critical!("sa{} results differ!", kind);

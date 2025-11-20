@@ -539,21 +539,17 @@ impl SA {
         })
     }
 
-    fn block_select(
+    /// Safety: `ranges` must yield at least one item.
+    unsafe fn block_select(
         &self,
         mut ranges: impl Iterator<Item = Range>,
         ban_filters: &[String],
     ) -> impl Iterator<Item = Key> {
         let v = self.len();
-        let mut res;
-        if let Some(range) = ranges.next() {
-            res = self.indices.join_blocks(range, v as Idx);
-            for range in ranges {
-                res.intersect_with(&self.indices.join_blocks(range, v as Idx));
-            }
-        } else {
-            res = FixedBitSet::with_capacity(v);
-            res.insert_range(0..v);
+        let first = unsafe { ranges.next().unwrap_unchecked() };
+        let mut res = self.indices.join_blocks(first, v as Idx);
+        for range in ranges {
+            res.intersect_with(&self.indices.join_blocks(range, v as Idx));
         }
         for f in ban_filters {
             res.difference_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
@@ -573,12 +569,16 @@ impl SA {
             .into_iter()
     }
 
-    fn block_ban_select(&self, ban_filters: &[String]) -> impl Iterator<Item = Key> {
-        let v = self.len();
-        let mut set = FixedBitSet::with_capacity(v);
-        for f in ban_filters {
-            let range = self.indices_range(f);
-            set.union_with(&self.indices.join_blocks(range, v as Idx));
+    /// Safety: `ban_filters` must be non-empty.
+    unsafe fn block_ban_select(&self, ban_filters: &[String]) -> impl Iterator<Item = Key> {
+        let v: usize = self.len();
+        // Safety: `IllustIndex::select` ensures at least one filter exists.
+        let (first, rest) = unsafe { ban_filters.split_first().unwrap_unchecked() };
+        let mut set = self
+            .indices
+            .join_blocks(self.indices_range(first), v as Idx);
+        for f in rest {
+            set.union_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
         }
         set.zeroes()
             .map(|idx| self.data[idx])
@@ -614,11 +614,14 @@ impl SA {
         patterns.iter().map(|patt| self.indices_range(patt))
     }
 
-    fn select<'a>(
-        &'a self,
-        filters: &'a [String],
-        ban_filters: &'a [String],
-    ) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        if self.size() == 0 {
+            return Box::new(std::iter::empty());
+        }
+
+        let filters = query.filters;
+        let ban_filters = query.ban_filters;
+
         #[cfg(feature = "sa-bench")]
         let flags = FLAGS.load(Ordering::Relaxed) & 0xf;
 
@@ -630,10 +633,6 @@ impl SA {
             );
         }
 
-        if self.size() == 0 {
-            return Box::new(std::iter::empty());
-        }
-
         match filters.len() {
             0 => {
                 #[cfg(feature = "sa-bench")]
@@ -641,7 +640,9 @@ impl SA {
                     debug!("forced inverted_ban_select");
                     return Box::new(self.inverted_ban_select(ban_filters));
                 }
-                return Box::new(self.block_ban_select(ban_filters));
+                // Safety: `Query::new` ensures at least one filter exists.
+                // Since `filters.len() == 0`, `ban_filters` must be non-empty.
+                return Box::new(unsafe { self.block_ban_select(ban_filters) });
             }
             1 => {
                 #[cfg(feature = "sa-bench")]
@@ -664,15 +665,19 @@ impl SA {
         #[cfg(feature = "sa-bench")]
         if flags == 0x7 {
             debug!("forced block_select");
-            return Box::new(self.block_select(all, ban_filters));
+            // Safety: we have ensured `filters.len() >= 1`.
+            return Box::new(unsafe { self.block_select(all, ban_filters) });
         }
 
         let all = all.collect_vec();
-        let (min_idx, &min) = all
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, poses)| poses.len())
-            .unwrap();
+
+        // Safety: we have ensured `filters.len() >= 1`.
+        let (min_idx, &min) = unsafe {
+            all.iter()
+                .enumerate()
+                .min_by_key(|(_, poses)| poses.len())
+                .unwrap_unchecked()
+        };
 
         let min_idx = min_idx as Idx;
         let min_len = min.len();
@@ -726,13 +731,30 @@ impl SA {
             return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
         }
 
-        Box::new(self.block_select(all.into_iter(), ban_filters))
+        // Safety: we have ensured `filters.len() >= 1`.
+        Box::new(unsafe { self.block_select(all.into_iter(), ban_filters) })
     }
 }
 
 impl Default for SA {
     fn default() -> Self {
         Self::from_iter::<&str, _>(std::iter::empty())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Query<'a> {
+    filters: &'a [String],
+    ban_filters: &'a [String],
+}
+
+impl<'a> Query<'a> {
+    pub fn new(filters: &'a [String], ban_filters: &'a [String]) -> Self {
+        assert!(!(filters.is_empty() && ban_filters.is_empty()));
+        Query {
+            filters,
+            ban_filters,
+        }
     }
 }
 
@@ -812,15 +834,11 @@ impl Index {
         }
     }
 
-    pub fn select(&self, filters: &[String], ban_filters: &[String]) -> Vec<Key> {
+    pub fn select(&self, query: Query) -> Vec<Key> {
         if let Some(minor) = &self.minor {
-            self.do_select(
-                self.major
-                    .select(filters, ban_filters)
-                    .chain(minor.select(filters, ban_filters)),
-            )
+            self.do_select(self.major.select(query).chain(minor.select(query)))
         } else {
-            self.do_select(self.major.select(filters, ban_filters))
+            self.do_select(self.major.select(query))
         }
     }
 
