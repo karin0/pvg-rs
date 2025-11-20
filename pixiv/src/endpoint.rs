@@ -5,7 +5,7 @@ struct Version {
 }
 
 type Result<T> = std::result::Result<T, url::ParseError>;
-pub(crate) type SimpleEndpoint = (Method, Url);
+type SimpleEndpoint = (Method, Url);
 
 impl Version {
     fn new<T: Into<String>>(prefix: T) -> Self {

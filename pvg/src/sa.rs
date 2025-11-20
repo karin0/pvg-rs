@@ -803,7 +803,7 @@ impl Index {
         sz
     }
 
-    fn _select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
+    fn do_select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
         if self.dedup {
             let mut seen = HashSet::new();
             iter.filter(|k| seen.insert(*k)).collect_vec()
@@ -814,13 +814,13 @@ impl Index {
 
     pub fn select(&self, filters: &[String], ban_filters: &[String]) -> Vec<Key> {
         if let Some(minor) = &self.minor {
-            self._select(
+            self.do_select(
                 self.major
                     .select(filters, ban_filters)
                     .chain(minor.select(filters, ban_filters)),
             )
         } else {
-            self._select(self.major.select(filters, ban_filters))
+            self.do_select(self.major.select(filters, ban_filters))
         }
     }
 

@@ -1,3 +1,6 @@
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_precision_loss)]
+
 mod config;
 mod core;
 mod disk_lru;
@@ -178,7 +181,7 @@ struct EnvResponse<'a> {
 
 const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
 
-fn _get_env(app: &Pvg) -> EnvResponse<'_> {
+fn do_get_env(app: &Pvg) -> EnvResponse<'_> {
     let features = vec![
         #[cfg(feature = "io-uring")]
         "io-uring",
@@ -205,7 +208,7 @@ fn _get_env(app: &Pvg) -> EnvResponse<'_> {
 
 #[get("/env")]
 async fn get_env(app: web::Data<Pvg>) -> impl Responder {
-    let r = _get_env(&app);
+    let r = do_get_env(&app);
     let r = serde_json::to_string(&r)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -242,7 +245,7 @@ async fn main() -> Result<()> {
         }
     })?;
     let data = web::Data::new(Pvg::new().await?);
-    _get_env(&data);
+    do_get_env(&data);
     let pvg = data.clone().into_inner();
 
     if pvg.is_worker() {

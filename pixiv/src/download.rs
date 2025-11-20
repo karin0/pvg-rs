@@ -29,7 +29,7 @@ impl DownloadClient {
             header::REFERER,
             HeaderValue::from_static("https://www.pixiv.net/"),
         );
-        DownloadClient {
+        Self {
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(60))

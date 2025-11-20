@@ -328,8 +328,8 @@ impl IllustIndex {
 
     pub fn load_dims_cache(&mut self, cache: DimCache) -> Result<()> {
         let mut cnt = 0;
-        for (iid, a) in &cache {
-            if let Some(i) = self.map.get_mut(iid) {
+        for (iid, a) in cache {
+            if let Some(i) = self.map.get_mut(&iid) {
                 cnt += 1;
                 let pc = i.data.page_count as usize;
                 if (pc - 1) * 2 == a.len() {

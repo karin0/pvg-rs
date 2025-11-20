@@ -64,7 +64,7 @@ impl AuthedState {
         })
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn expired(&self) -> bool {
         SystemTime::now() > self.expires_at
     }
@@ -132,12 +132,12 @@ impl Default for GuestClient {
 }
 
 impl GuestClient {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn into_authed(self, token: AuthedState) -> AuthedClient {
         Client {
             http: self.http,
@@ -154,7 +154,7 @@ impl AuthedClient {
         Ok(r.into_authed(s))
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn load(state: AuthedState) -> Self {
         Self::make(state)
     }
