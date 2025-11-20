@@ -98,7 +98,7 @@ impl Store {
         Ok(r)
     }
 
-    async fn _upsert<'a, I>(&self, illusts: I) -> Result<()>
+    async fn do_upsert<'a, I>(&self, illusts: I) -> Result<()>
     where
         I: IntoIterator<Item = (&'a Vec<u8>, IllustId)>,
     {
@@ -135,17 +135,17 @@ impl Store {
     {
         let all = illusts.collect_vec();
         if all.len() <= BATCH_SIZE {
-            return self._upsert(all).await;
+            return self.do_upsert(all).await;
         }
 
         let tx = self.pool.begin().await?;
         for chunk in all.chunks(BATCH_SIZE) {
-            self._upsert(chunk.iter().copied()).await?;
+            self.do_upsert(chunk.iter().copied()).await?;
         }
         Ok(tx.commit().await?)
     }
 
-    async fn _overwrite<'a, I>(&self, illusts: I) -> Result<()>
+    async fn do_overwrite<'a, I>(&self, illusts: I) -> Result<()>
     where
         I: IntoIterator<Item = (&'a Vec<u8>, IllustId)>,
     {
@@ -180,10 +180,10 @@ impl Store {
         query!("VACUUM").execute(&self.pool).await?;
 
         if all.len() <= BATCH_SIZE {
-            self._overwrite(all).await?;
+            self.do_overwrite(all).await?;
         } else {
             for chunk in all.chunks(BATCH_SIZE) {
-                self._overwrite(chunk.iter().copied()).await?;
+                self.do_overwrite(chunk.iter().copied()).await?;
             }
         }
         Ok(tx.commit().await?)

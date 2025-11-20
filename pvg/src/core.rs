@@ -209,7 +209,7 @@ impl Pvg {
         Ok(())
     }
 
-    async fn _quick_update_with_page(&self, stage: usize, r: Vec<Value>) -> Result<bool> {
+    async fn do_quick_update_with_page(&self, stage: usize, r: Vec<Value>) -> Result<bool> {
         let mut updated = false;
         let mut index = self.index.write().await;
         for illust in r {
@@ -228,7 +228,7 @@ impl Pvg {
         Ok(self.api.read().await)
     }
 
-    async fn _quick_update(&self, stage: usize, restrict: Restrict, pn_limit: u32) -> Result<()> {
+    async fn do_quick_update(&self, stage: usize, restrict: Restrict, pn_limit: u32) -> Result<()> {
         let mut pn = 1;
         if pn > pn_limit {
             return Ok(());
@@ -241,7 +241,7 @@ impl Pvg {
         if !self.is_worker() {
             info!("{:?} page 1: {} illusts", restrict, r.illusts.len());
         }
-        if self._quick_update_with_page(stage, r.illusts).await? {
+        if self.do_quick_update_with_page(stage, r.illusts).await? {
             return Ok(());
         }
         while let Some(u) = r.next_url {
@@ -269,7 +269,7 @@ impl Pvg {
             if !self.is_worker() {
                 info!("page {}: {} illusts", pn, r.illusts.len());
             }
-            if self._quick_update_with_page(stage, r.illusts).await? {
+            if self.do_quick_update_with_page(stage, r.illusts).await? {
                 break;
             }
         }
@@ -290,8 +290,8 @@ impl Pvg {
             u32::MAX
         };
         let r = try_join!(
-            self._quick_update(0, Restrict::Private, limit),
-            self._quick_update(1, Restrict::Public, limit),
+            self.do_quick_update(0, Restrict::Private, limit),
+            self.do_quick_update(1, Restrict::Public, limit),
         );
         let mut index = self.index.write().await;
         if let Err(e) = r {
@@ -409,7 +409,7 @@ impl Pvg {
         self.disk_lru.write().evict(limit)
     }
 
-    async fn _disk_evict_to(&self, limit: u64) {
+    async fn disk_evict_to(&self, limit: u64) {
         while let Some(file) = self.disk_evict(limit) {
             self.disk_remove(&file).await;
         }
@@ -417,13 +417,13 @@ impl Pvg {
 
     async fn disk_evict_all(&self) {
         if let Some(limit) = self.lru_limit {
-            self._disk_evict_to(limit).await;
+            self.disk_evict_to(limit).await;
         }
     }
 
     pub async fn enforce_cache_limit(&self) {
         if let Some(limit) = self.conf.cache_limit {
-            self._disk_evict_to(limit).await;
+            self.disk_evict_to(limit).await;
         }
     }
 
@@ -505,7 +505,7 @@ impl Pvg {
         Ok((DownloadingStream { remote, tx, path }).stream())
     }
 
-    async fn _download_file(
+    async fn write_download_file(
         mut resp: pixiv::reqwest::Response,
         file: &mut DownloadingFile,
     ) -> Result<()> {
@@ -515,7 +515,7 @@ impl Pvg {
         Ok(())
     }
 
-    async fn _downloader_inner(&self, url: &str, path: &Path) -> Result<u64> {
+    async fn do_download_file(&self, url: &str, path: &Path) -> Result<u64> {
         let perm = DOWNLOAD_SEMA.acquire().await?;
         let mut tmp = self.open_temp(path).await?;
         let r = match self.pixiv.download(url).await {
@@ -529,7 +529,7 @@ impl Pvg {
         let size = r.content_length();
 
         tmp.start();
-        let res = Self::_download_file(r, &mut tmp).await;
+        let res = Self::write_download_file(r, &mut tmp).await;
         drop(perm);
         if let Err(e) = res {
             tmp.rollback().await;
@@ -538,8 +538,8 @@ impl Pvg {
         tmp.commit(path, size).await
     }
 
-    async fn _downloader(&self, url: String, path: PathBuf) -> (PathBuf, Result<u64>) {
-        let r = self._downloader_inner(&url, &path).await;
+    async fn download_file(&self, url: String, path: PathBuf) -> (PathBuf, Result<u64>) {
+        let r = self.do_download_file(&url, &path).await;
         (path, r)
     }
 
@@ -608,7 +608,7 @@ impl Pvg {
     pub async fn download_all(&self) -> Result<u32> {
         let _ = self.download_all_lock.try_lock()?;
         let q = self.make_download_queue().await;
-        let (r, dirty_404) = self._download_all(q).await?;
+        let (r, dirty_404) = self.do_download_all(q).await?;
         if dirty_404 {
             self.save_cache().await?;
         }
@@ -620,10 +620,10 @@ impl Pvg {
         let q = self.make_download_queue_from(ids).await;
 
         // The caller is responsible for saving cache.
-        self._download_all(q).await
+        self.do_download_all(q).await
     }
 
-    async fn _download_all(&self, q: Vec<(String, PathBuf)>) -> Result<(u32, bool)> {
+    async fn do_download_all(&self, q: Vec<(String, PathBuf)>) -> Result<(u32, bool)> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
@@ -634,7 +634,7 @@ impl Pvg {
         debug!("{} pages to download", q.len());
         let mut futs = q
             .into_iter()
-            .map(|(url, path)| self._downloader(url, path))
+            .map(|(url, path)| self.download_file(url, path))
             .collect::<FuturesUnordered<_>>();
         let n = futs.len();
         let mut cnt: u32 = 0;
