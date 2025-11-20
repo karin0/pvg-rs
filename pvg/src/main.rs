@@ -229,7 +229,11 @@ async fn main() -> Result<()> {
         pretty_env_logger::init_timed();
     }
 
-    info!("pvg {VERSION}");
+    info!(
+        "{} {} ({VERSION})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
     let (tx, rx) = oneshot::channel();
     let mut tx = Some(tx);
     ctrlc::set_handler(move || match tx.take() {
