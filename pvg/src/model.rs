@@ -11,6 +11,7 @@ use serde_json::value::Value as JsonValue;
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::time::Duration;
 use tokio::time::Instant;
 
 #[cfg(feature = "sam")]
@@ -237,7 +238,14 @@ impl IllustIndex {
             })
             .collect::<HashMap<_, _>>();
 
-        info!("parsed {} illlusts, raw: {} MiB", map.len(), size >> 20);
+        let stats = Store::stats();
+        info!(
+            "parsed {} illlusts from {} MiB (decompressed from {} MiB in {:.3?})",
+            map.len(),
+            size >> 20,
+            stats.0 >> 20,
+            Duration::from_nanos(stats.1 as u64)
+        );
 
         #[cfg(feature = "sam")]
         let sa = if disable_select {
@@ -340,6 +348,55 @@ impl IllustIndex {
         Ok(())
     }
 
+    #[cfg(feature = "diff")]
+    async fn debug_updated_illust(store: &Store, new: &Illust, item: &StagedItem) -> Result<()> {
+        use similar::{ChangeTag, TextDiff};
+
+        let iid = new.data.id;
+        let Some(old_json) = store.get_illust(iid).await? else {
+            critical!("UPDATED ILLUST {} ABSENT IN DB!\n{:?}", iid, new);
+            return Ok(());
+        };
+        let mut value = serde_json::from_slice::<JsonValue>(&old_json)?;
+        drop(old_json);
+        value.sort_all_objects();
+        let old_json = serde_json::to_string_pretty(&value)?;
+        drop(value);
+
+        let mut value = serde_json::from_slice::<JsonValue>(&item.json)?;
+        value.sort_all_objects();
+        let new_json = serde_json::to_string_pretty(&value)?;
+        drop(value);
+
+        let diff = TextDiff::from_lines(&old_json, &new_json);
+        let changes = diff
+            .iter_all_changes()
+            .filter(|c| c.tag() != ChangeTag::Equal)
+            .collect_vec();
+
+        if changes.is_empty() {
+            // Updated, but not changed. This happens at the first fetch after startup,
+            // since `IllustStage.cache` is not persisted.
+            // Otherwise, we would be likely to see `total_view` changes every time
+            // when we fetch them.
+            // As a debugger, we don't prevent the update anyway.
+            return Ok(());
+        }
+
+        warn!(
+            "Illust changed! {iid} ({}): {:?}",
+            new.data.title, item.status
+        );
+        for change in changes {
+            match change.tag() {
+                ChangeTag::Delete => warn!("- {}", change.to_string_lossy().trim()),
+                ChangeTag::Insert => warn!("+ {}", change.to_string_lossy().trim()),
+                ChangeTag::Equal => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
     pub fn stage(&mut self, stage_id: usize, raw: JsonValue) -> Result<bool> {
         // Instead of using `RawValue`, we reserialize it to sanitize the JSON
         // (pixiv escapes unicode chars). Feature `preserve_order` is enforced here.
@@ -365,9 +422,12 @@ impl IllustIndex {
                             // The exactly same data already exists in the map.
                             return Ok(false);
                         }
-                        trace!("{stage_id}: illust updated: {id}");
-                        trace!("old: {:?}", old.data);
-                        trace!("new: {:?}", illust.data);
+                        debug!("{stage_id}: illust updated: {id}: {}", illust.data.title);
+                        #[cfg(not(feature = "diff"))]
+                        {
+                            debug!("old: {:?}", old.data);
+                            debug!("new: {:?}", illust.data);
+                        }
                     }
                     #[cfg(feature = "sam")]
                     {
@@ -463,9 +523,31 @@ impl IllustIndex {
                 .collect_vec()
         };
 
+        #[cfg(feature = "diff")]
+        if log_enabled!(log::Level::Debug) {
+            for item in &stage {
+                if item.status != StagedStatus::New {
+                    let Some(new) = self.map.get(&item.id) else {
+                        critical!("debug_updated_illust: ILLUST {} MISSING IN MAP!", item.id);
+                        continue;
+                    };
+                    if let Err(e) = Self::debug_updated_illust(&self.store, new, item).await {
+                        error!("debug_updated_illust: {}: {e:?}", item.id);
+                    }
+                }
+            }
+        }
+
         let new_ids = IllustStage::new_ids(&stage).rev().collect_vec();
         let delta = new_ids.len();
-        info!("{stage_id}: committing {cnt} illusts ({delta} new)");
+        log!(
+            if delta > 0 {
+                log::Level::Info
+            } else {
+                log::Level::Debug
+            },
+            "{stage_id}: committing {cnt} illusts ({delta} new)"
+        );
         if let Err(e) = self
             .store
             .upsert(stage.iter().map(|item| (&item.json, item.id)))
@@ -592,17 +674,17 @@ impl IllustIndex {
                     let res = res.into_iter().collect::<BTreeSet<_>>();
                     let ans = ans.iter().copied().collect::<BTreeSet<_>>();
 
-                    let a = res.difference(&ans).collect::<Vec<_>>();
+                    let a = res.difference(&ans).collect_vec();
                     let n = a.len();
                     if n > 0 {
-                        let s = a.into_iter().take(10).copied().collect::<Vec<_>>();
+                        let s = a.into_iter().take(10).copied().collect_vec();
                         error!("only in res ({n}): {s:?}");
                     }
 
-                    let a = ans.difference(&res).collect::<Vec<_>>();
+                    let a = ans.difference(&res).collect_vec();
                     let n = a.len();
                     if n > 0 {
-                        let s = a.into_iter().take(10).copied().collect::<Vec<_>>();
+                        let s = a.into_iter().take(10).copied().collect_vec();
                         error!("only in ans ({n}): {s:?}");
                     }
                 }

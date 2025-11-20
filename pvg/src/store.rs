@@ -7,7 +7,7 @@ use sqlx::{
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct Store {
@@ -34,7 +34,8 @@ fn to_blob(json: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 static UNCOMPRESSED_CNT: AtomicUsize = AtomicUsize::new(0);
-static DECOMPRESS_COST: AtomicUsize = AtomicUsize::new(0);
+static DECOMPRESS_TIME: AtomicUsize = AtomicUsize::new(0);
+static COMPRESSED_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 fn to_json(blob: Vec<u8>) -> std::io::Result<Vec<u8>> {
     if blob[0] != b'L' {
@@ -51,7 +52,8 @@ fn to_json(blob: Vec<u8>) -> std::io::Result<Vec<u8>> {
     let t0 = Instant::now();
     let r = decompress(&blob[1..], None)?;
     let cost = t0.elapsed().as_nanos() as usize;
-    DECOMPRESS_COST.fetch_add(cost, Ordering::Relaxed);
+    COMPRESSED_SIZE.fetch_add(blob.len(), Ordering::Relaxed);
+    DECOMPRESS_TIME.fetch_add(cost, Ordering::Relaxed);
     Ok(r)
 }
 
@@ -77,8 +79,21 @@ impl Store {
         if cnt > 0 {
             warn!("found {cnt} uncompressed blobs!");
         }
-        let time = DECOMPRESS_COST.swap(0, Ordering::Relaxed);
-        info!("decompression took {:?}", Duration::from_nanos(time as u64));
+        Ok(r)
+    }
+
+    pub fn stats() -> (usize, usize) {
+        let size = COMPRESSED_SIZE.swap(0, Ordering::Relaxed);
+        let time = DECOMPRESS_TIME.swap(0, Ordering::Relaxed);
+        (size, time)
+    }
+
+    pub async fn get_illust(&self, iid: IllustId) -> Result<Option<Vec<u8>>> {
+        let r = query_scalar!("SELECT data FROM Illust WHERE iid = ?", iid)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(to_json)
+            .transpose()?;
         Ok(r)
     }
 
