@@ -3,6 +3,7 @@ use pixiv::IllustId;
 use pixiv::model as api;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::mem::size_of;
 use string_interner::{DefaultSymbol, StringInterner, backend::BucketBackend as Backend};
 
 type TagId = DefaultSymbol;
@@ -48,6 +49,15 @@ pub struct IllustData {
     pub create_date: String,
 }
 
+impl IllustData {
+    pub fn memory(&self) -> usize {
+        size_of::<Self>()
+            + self.title.len()
+            + self.create_date.len()
+            + self.tags.len() * size_of::<TagId>()
+    }
+}
+
 pub struct IllustService {
     users: HashMap<u32, User>,
     tags: StringInterner<Backend>,
@@ -55,6 +65,28 @@ pub struct IllustService {
 }
 
 impl IllustService {
+    pub fn memory(&self) -> usize {
+        size_of::<Self>()
+            + self
+                .users
+                .values()
+                .map(|u| {
+                    size_of::<User>()
+                        + (1 + u.cnt.len()) * (size_of::<UserNameId>() + size_of::<u32>())
+                })
+                .sum::<usize>()
+            + self
+                .tags
+                .iter()
+                .chain(self.user_names.iter())
+                .map(|(_, s)| s.len())
+                .sum::<usize>()
+    }
+
+    pub fn lens(&self) -> (usize, usize, usize) {
+        (self.users.len(), self.tags.len(), self.user_names.len())
+    }
+
     pub fn new() -> Self {
         Self {
             users: HashMap::new(),

@@ -96,6 +96,7 @@ impl Pvg {
             nav.len(),
             t.elapsed().as_millis()
         );
+        nav.stats();
 
         let not_found;
         let worker_to_download;

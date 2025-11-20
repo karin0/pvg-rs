@@ -9,6 +9,7 @@ use pixiv::{PageNum, model as api};
 use serde::Deserialize;
 use serde_json::value::Value as JsonValue;
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
+use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
@@ -66,6 +67,22 @@ pub struct Illust {
     deleted: bool,
 }
 
+impl Illust {
+    fn memory_url(&self) -> usize {
+        self.pages.iter().map(|p| p.source.url.len()).sum::<usize>()
+    }
+
+    fn memory(&self) -> usize {
+        size_of::<Self>()
+            + self
+                .pages
+                .iter()
+                .map(|p| p.source.url.len() + size_of::<Page>())
+                .sum::<usize>()
+            + self.data.memory()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StagedStatus {
     New,
@@ -111,6 +128,41 @@ pub struct IllustIndex {
     #[cfg(feature = "sam")]
     sa: SAIndex,
     disable_select: bool,
+}
+
+impl IllustIndex {
+    pub fn stats(&self) {
+        let map = self.map.values().map(Illust::memory).sum::<usize>()
+            + self.map.len() * size_of::<IllustId>();
+        let urls = self.map.values().map(Illust::memory_url).sum::<usize>();
+        let ids = self.ids.len() * size_of::<IllustId>();
+        let srv = self.srv.memory();
+        let srv_lens = self.srv.lens();
+        let sa = {
+            #[cfg(feature = "sam")]
+            {
+                self.sa.memory()
+            }
+            #[cfg(not(feature = "sam"))]
+            {
+                0
+            }
+        };
+        let tot = map + ids + srv + sa + size_of::<Self>();
+        info!(
+            "illusts: map={} ({}, {}, {}), srv={}K ({}, {}, {}), sa={}, tot={} MiB",
+            map >> 20,
+            urls >> 20,
+            self.map.len(),
+            self.ids.len(),
+            srv >> 10,
+            srv_lens.0,
+            srv_lens.1,
+            srv_lens.2,
+            sa >> 20,
+            tot >> 20
+        );
+    }
 }
 
 impl Page {

@@ -88,6 +88,7 @@ impl Store {
         (size, time)
     }
 
+    #[cfg(feature = "diff")]
     pub async fn get_illust(&self, iid: IllustId) -> Result<Option<Vec<u8>>> {
         let r = query_scalar!("SELECT data FROM Illust WHERE iid = ?", iid)
             .fetch_optional(&self.pool)
