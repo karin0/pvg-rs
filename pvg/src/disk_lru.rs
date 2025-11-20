@@ -1,4 +1,8 @@
 use lru::LruCache;
+use std::io::Result;
+use std::path::Path;
+use std::time::SystemTime;
+use tokio::fs;
 
 #[derive(Debug)]
 pub struct DiskLru {
@@ -7,6 +11,55 @@ pub struct DiskLru {
 }
 
 impl DiskLru {
+    pub async fn load(
+        size_hint: usize,
+        dir: &Path,
+        cache_limit: Option<u64>,
+    ) -> Result<(Self, Option<u64>)> {
+        let mut entires = Vec::with_capacity(size_hint);
+        let mut it = fs::read_dir(dir).await?;
+        while let Some(file) = it.next_entry().await? {
+            let meta = file.metadata().await?;
+            let file = file.file_name().into_string().unwrap();
+            let size = meta.len();
+            let time = if cache_limit.is_some() {
+                meta.accessed()
+                    .or_else(|_| meta.modified())
+                    .or_else(|_| meta.created())
+                    .unwrap_or(SystemTime::UNIX_EPOCH)
+            } else {
+                SystemTime::UNIX_EPOCH
+            };
+            entires.push((file, size, time));
+        }
+
+        let total_size: u64 = entires.iter().map(|(_, size, _)| *size).sum();
+        info!(
+            "disk: {} files, {:.2} MiB",
+            entires.len(),
+            total_size as f32 / ((1 << 20) as f32)
+        );
+
+        let lru_limit = if let Some(limit) = cache_limit {
+            entires.sort_unstable_by_key(|(_, _, time)| time.to_owned());
+            if total_size > limit {
+                warn!("cache size over limit: {total_size} > {limit}");
+                Some(total_size)
+            } else {
+                Some(limit)
+            }
+        } else {
+            None
+        };
+
+        let mut lru = Self::new();
+        for (file, size, _) in entires {
+            lru.insert(file, size);
+        }
+
+        Ok((lru, lru_limit))
+    }
+
     pub fn new() -> Self {
         Self {
             lru: LruCache::unbounded(),

@@ -20,7 +20,6 @@ use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, RwLockWriteGuard, Semaphore, mpsc};
 use tokio::time::{Duration, Instant, sleep};
 use tokio::{fs, try_join};
@@ -139,47 +138,10 @@ impl Pvg {
         info!("api: {} {}", api.state.user.name, api.state.user.id);
         let uid = api.state.user.id.to_string();
 
-        let mut vec = Vec::with_capacity(nav.len());
-        let mut total_size = 0;
-        let mut files = fs::read_dir(&config.pix_dir).await?;
-        while let Some(file) = files.next_entry().await? {
-            let meta = file.metadata().await?;
-            let file = file.file_name().into_string().unwrap();
-            let size = meta.len();
-            let time = if config.cache_limit.is_some() {
-                meta.accessed()
-                    .or_else(|_| meta.modified())
-                    .or_else(|_| meta.created())
-                    .unwrap_or(SystemTime::UNIX_EPOCH)
-            } else {
-                SystemTime::UNIX_EPOCH
-            };
-            vec.push((file, size, time));
-            total_size += size;
-        }
-        info!(
-            "disk: {} files, {:.2} MiB",
-            vec.len(),
-            total_size as f32 / ((1 << 20) as f32)
-        );
-        let lru_limit = if let Some(limit) = config.cache_limit {
-            vec.sort_unstable_by_key(|(_, _, time)| time.to_owned());
-            if total_size > limit {
-                warn!("cache size over limit: {total_size} > {limit}");
-                Some(total_size)
-            } else {
-                Some(limit)
-            }
-        } else {
-            None
-        };
-
-        let mut lru = DiskLru::new();
-        for (file, size, _) in vec {
-            lru.insert(file, size);
-        }
-
         let index_size = nav.len();
+        let (lru, lru_limit) =
+            DiskLru::load(index_size, &config.pix_dir, config.cache_limit).await?;
+
         let upscaler = if let Some(ref path) = config.upscaler_path {
             Some(Upscaler::new(path.clone(), &config).await?)
         } else {
