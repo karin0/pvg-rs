@@ -545,7 +545,14 @@ impl IllustIndex {
         {
             let t0 = Instant::now();
             let res = self.sa.select(filters, ban_filters);
-            info!("sa: {} items in {:?}", res.len(), t0.elapsed());
+            let dt = t0.elapsed();
+            let st = SAIndex::stat();
+            info!(
+                "sa: {} items in {dt:?}, stat {st} ({:.3}/us)",
+                res.len(),
+                f64::from(st) / (dt.as_secs_f64() * 1e6)
+            );
+
             Box::new(res.into_iter().map(|iid| &self.map[&iid]))
         }
         #[cfg(not(feature = "sam"))]
