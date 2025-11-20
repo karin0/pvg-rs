@@ -4,6 +4,7 @@ use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 use suffix::SuffixTable;
 
 // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
@@ -41,42 +42,6 @@ impl RangeExt for Range {
     }
 }
 
-struct SA {
-    sa: SuffixTable<'static, 'static>,
-    data: Vec<Key>,   // len = V, number of strings
-    starts: Vec<Pos>, // len = V
-    indices: Indices,
-}
-
-struct SAInner {
-    full: String,
-    starts: Vec<Pos>,
-    data: Vec<Key>,
-}
-
-impl SAInner {
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
-        let full = &self.full;
-        let starts = &self.starts;
-        let data = &self.data;
-        let strs = starts
-            .iter()
-            .circular_tuple_windows()
-            .map(move |(&p1, &p2)| {
-                if p1 < p2 {
-                    &full[p1 as usize..(p2 - 1) as usize]
-                } else {
-                    &full[p1 as usize..]
-                }
-            });
-        data.iter().copied().zip(strs)
-    }
-}
-
 struct Indices {
     inner: Vec<Idx>, // len = N, total length of all strings (in bytes)
     #[cfg(feature = "sa-inverted")]
@@ -86,14 +51,10 @@ struct Indices {
 }
 
 impl Indices {
-    fn new<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(
-        iter: I,
-        v: Idx,
-        sa: &[Pos],
-    ) -> Indices {
+    fn new<S: AsRef<str>, I: Iterator<Item = S>>(iter: I, v: Idx, sa: &[Pos]) -> Indices {
         let raw_indices = iter
             .enumerate()
-            .flat_map(|(idx, (_, s))| {
+            .flat_map(|(idx, s)| {
                 std::iter::repeat_n(idx as Pos, s.as_ref().len() + usize::from(idx != 0))
             })
             .collect_vec();
@@ -178,7 +139,7 @@ impl Indices {
         }
         if start < end {
             let blocks = end - start;
-            STAT.fetch_add(blocks, Ordering::Relaxed);
+            STATS.fetch_add(blocks, Ordering::Relaxed);
             debug!("joining {blocks} blocks");
             for b in &self.blocks[start as usize..end as usize] {
                 res.union_with(b);
@@ -207,10 +168,43 @@ impl std::ops::Index<Range> for Indices {
     }
 }
 
+struct Stub {
+    full: String,
+    starts: Vec<Pos>,
+    data: Vec<Key>,
+}
+
+fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a str> + 'a {
+    starts
+        .iter()
+        .circular_tuple_windows()
+        .map(move |(&p1, &p2)| {
+            if p1 < p2 {
+                &full[p1 as usize..(p2 - 1) as usize]
+            } else {
+                &full[p1 as usize..]
+            }
+        })
+}
+
+impl Stub {
+    fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
+        let strs = iter_parts(&self.full, &self.starts);
+        self.data.iter().copied().zip(strs)
+    }
+}
+
+struct SA {
+    sa: SuffixTable<'static, 'static>,
+    data: Vec<Key>,   // len = V, number of strings
+    starts: Vec<Pos>, // len = V
+    indices: Indices,
+}
+
 #[cfg(feature = "sa-bench")]
 static FLAGS: AtomicU32 = AtomicU32::new(0);
 
-static STAT: AtomicU32 = AtomicU32::new(0);
+static STATS: AtomicU32 = AtomicU32::new(0);
 
 impl SA {
     fn memory(&self) -> usize {
@@ -229,7 +223,7 @@ impl SA {
         r
     }
 
-    fn stat(&self, dt: std::time::Duration) {
+    fn stats(&self, dt: Duration) {
         let n = self.size();
         let v = self.len();
         let sa = (n * size_of::<Pos>()) >> 10;
@@ -242,17 +236,52 @@ impl SA {
         );
     }
 
-    pub fn from<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(iter: I) -> SA {
-        let t0 = std::time::Instant::now();
-        let size: usize = iter
-            .clone()
+    fn from_inner(mut stub: Stub, t0: Instant) -> Self {
+        stub.full.shrink_to_fit();
+        stub.data.shrink_to_fit();
+        stub.starts.shrink_to_fit();
+
+        let t1 = Instant::now();
+        let sa = SuffixTable::new(stub.full);
+        debug!("SA table constructed in {:?}", t1.elapsed());
+
+        let t1 = Instant::now();
+        let indices = Indices::new(
+            iter_parts(sa.text(), &stub.starts),
+            stub.data.len() as Idx,
+            sa.table(),
+        );
+        debug!("Indices constructed in {:?}", t1.elapsed());
+
+        let dt = t0.elapsed();
+        let r = SA {
+            sa,
+            data: stub.data,
+            starts: stub.starts,
+            indices,
+        };
+
+        if log_enabled!(log::Level::Debug) {
+            r.stats(dt);
+        }
+        r
+    }
+
+    fn get_size_hint<S: AsRef<str>>(items: &[(Key, S)]) -> usize {
+        items
+            .iter()
             .map(|(_, s)| s.as_ref().len() + 1)
             .sum::<usize>()
-            .saturating_sub(1);
-        let mut full = String::with_capacity(size);
+    }
+
+    fn from_iter<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(iter: I) -> Self {
+        let t0 = Instant::now();
+        let items = iter.collect_vec();
+        let mut full = String::with_capacity(Self::get_size_hint(&items).saturating_sub(1));
+
         let mut first = true;
-        let (mut data, mut starts): (Vec<Key>, Vec<Pos>) = iter
-            .clone()
+        let (data, starts): (Vec<Key>, Vec<Pos>) = items
+            .into_iter()
             .map(|(k, s)| {
                 let s = s.as_ref();
                 assert!(!s.is_empty());
@@ -266,27 +295,33 @@ impl SA {
                 (k, start)
             })
             .unzip();
-        data.shrink_to_fit();
-        starts.shrink_to_fit();
 
-        let t1 = std::time::Instant::now();
-        let sa = SuffixTable::new(full);
-        debug!("SA constructed in {:?}", t1.elapsed());
+        SA::from_inner(Stub { full, starts, data }, t0)
+    }
 
-        let indices = Indices::new(iter, data.len() as Idx, sa.table());
+    fn extend<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(self, iter: I) -> Self {
+        if self.len() == 0 {
+            return Self::from_iter(iter);
+        }
+        let t0 = Instant::now();
+        let items = iter.collect_vec();
+        let v = items.len();
 
-        let r = SA {
-            sa,
-            data,
-            starts,
-            indices,
-        };
+        let mut inner = self.into_inner();
+        inner.full.reserve(Self::get_size_hint(&items));
+        inner.starts.reserve(v);
+        inner.data.reserve(v);
 
-        if size > 0 && log_enabled!(log::Level::Debug) {
-            r.stat(t0.elapsed());
+        for (k, s) in items {
+            // We have ensured `data` is non-empty, so we always put a separator here.
+            inner.full.push('\\');
+            let start = inner.full.len() as Pos;
+            inner.full.push_str(s.as_ref());
+            inner.starts.push(start);
+            inner.data.push(k);
         }
 
-        r
+        SA::from_inner(inner, t0)
     }
 
     // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
@@ -347,9 +382,9 @@ impl SA {
     }
 
     #[inline]
-    fn into_inner(self) -> SAInner {
+    fn into_inner(self) -> Stub {
         let (full, _) = self.sa.into_parts();
-        SAInner {
+        Stub {
             full: full.to_string(),
             starts: self.starts,
             data: self.data,
@@ -380,11 +415,11 @@ impl SA {
                 let l = s.len();
                 if filters.iter().enumerate().all(|(p, tag)| {
                     p as Idx == min_idx || {
-                        STAT.fetch_add(l as u32, Ordering::Relaxed);
+                        STATS.fetch_add(l as u32, Ordering::Relaxed);
                         s.contains(tag)
                     }
                 } && !ban_filters.iter().any(|tag| {
-                    STAT.fetch_add(l as u32, Ordering::Relaxed);
+                    STATS.fetch_add(l as u32, Ordering::Relaxed);
                     s.contains(tag)
                 })) {
                     Some(key)
@@ -438,7 +473,7 @@ impl SA {
 
         for (p, range) in all_ranges.into_iter().enumerate() {
             debug!("candidates: {}", s.len());
-            STAT.fetch_add(range.len() as u32, Ordering::Relaxed);
+            STATS.fetch_add(range.len() as u32, Ordering::Relaxed);
             if p as Idx == min_idx {
                 continue;
             }
@@ -457,7 +492,7 @@ impl SA {
 
         for range in ban_filters {
             let indices = self.indices(range);
-            STAT.fetch_add(indices.len() as u32, Ordering::Relaxed);
+            STATS.fetch_add(indices.len() as u32, Ordering::Relaxed);
             for idx in indices {
                 s.remove(idx);
             }
@@ -479,7 +514,7 @@ impl SA {
             .iter()
             .flat_map(|patt| self.indices(patt))
             .collect::<HashSet<_>>();
-        STAT.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
+        STATS.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
         self.data.iter().enumerate().filter_map(move |(idx, &key)| {
             if ban_idxs.contains(&(idx as Pos)) {
                 None
@@ -538,13 +573,13 @@ impl SA {
         for range in ranges {
             let indices = &self.indices[range];
             let t = indices.iter().copied().collect::<BTreeSet<_>>();
-            STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
+            STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.intersection(&t).copied().collect();
         }
         for range in ban_ranges {
             let indices = &self.indices[range];
             let t: BTreeSet<u32> = indices.iter().copied().collect::<BTreeSet<_>>();
-            STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
+            STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.difference(&t).copied().collect();
         }
         s.into_iter().map(|idx| self.data[idx as usize])
@@ -668,7 +703,7 @@ impl SA {
 
 impl Default for SA {
     fn default() -> Self {
-        Self::from::<&str, _>(std::iter::empty())
+        Self::from_iter::<&str, _>(std::iter::empty())
     }
 }
 
@@ -698,12 +733,6 @@ impl Dedup {
     }
 }
 
-fn extend<'a, I: IntoIterator<Item = Item<'a>>>(out: &mut Vec<Item<'a>>, iter: I) {
-    for (k, s) in iter {
-        out.push((k, s));
-    }
-}
-
 #[derive(Default)]
 pub struct Index {
     major: SA,
@@ -712,9 +741,9 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn new<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(data: I) -> Self {
+    pub fn new<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(data: I) -> Self {
         Self {
-            major: SA::from(data),
+            major: SA::from_iter(data),
             minor: None,
             dedup: false,
         }
@@ -725,8 +754,8 @@ impl Index {
         FLAGS.store(flags, Ordering::Relaxed);
     }
 
-    pub fn stat() -> u32 {
-        STAT.swap(0, Ordering::Relaxed)
+    pub fn stats() -> u32 {
+        STATS.swap(0, Ordering::Relaxed)
     }
 
     pub fn size(&self) -> usize {
@@ -773,52 +802,52 @@ impl Index {
         if let Some(minor) = self.minor.take() {
             let len = data.len();
             let data = data.iter().map(|(k, s)| (*k, s.as_str()));
-            if (minor.len() + data.len()) * 16 > self.major.len() {
+            let minor_len = minor.len();
+            if (minor_len + data.len()) * 16 > self.major.len() {
                 warn!(
-                    " SA indices: major={}, minor={}, new={}",
+                    "Compacting SA indices: major={}, minor={minor_len}, new={}",
                     self.major.len(),
-                    minor.len(),
                     data.len()
                 );
 
                 // Drop the old indices before reconstruction.
-                let major = std::mem::take(&mut self.major).into_inner();
                 let minor = minor.into_inner();
+                self.minor = None;
 
-                let mut combined = major.iter().collect_vec();
-                combined.reserve(minor.len() + len);
+                self.major = if self.dedup {
+                    let major = std::mem::take(&mut self.major).into_inner();
+                    let mut combined = major.iter().collect_vec();
+                    combined.reserve(minor_len + len);
 
-                let minor = minor.iter();
-
-                if self.dedup {
                     let mut dedup = Dedup::default();
-                    dedup.extend(&mut combined, minor);
+                    dedup.extend(&mut combined, minor.iter());
                     if dup {
                         dedup.extend(&mut combined, data);
                     } else {
-                        extend(&mut combined, data);
+                        combined.extend(data);
                     }
+
                     self.dedup = false;
+                    SA::from_iter(combined.into_iter())
                 } else {
-                    combined.extend(minor);
-                    extend(&mut combined, data);
+                    std::mem::take(&mut self.major).extend(minor.iter().chain(data))
                 }
-                self.major = SA::from(combined.into_iter());
-                self.minor = None;
             } else {
-                let minor = minor.into_inner();
-                let mut combined = minor.iter().collect_vec();
-                combined.reserve(len);
-                if dup {
+                self.minor = Some(if dup {
+                    let minor = minor.into_inner();
+                    let mut combined = minor.iter().collect_vec();
+                    combined.reserve(len);
+
                     let mut dedup = Dedup::default();
                     dedup.extend(&mut combined, data);
+
+                    SA::from_iter(combined.into_iter())
                 } else {
-                    extend(&mut combined, data);
-                }
-                self.minor = Some(SA::from(combined.into_iter()));
+                    minor.extend(data)
+                });
             }
         } else {
-            self.minor = Some(SA::from(data.into_iter()));
+            self.minor = Some(SA::from_iter(data.into_iter()));
         }
     }
 }

@@ -539,7 +539,7 @@ impl IllustIndex {
         let t0 = Instant::now();
         let res = self.sa.select(filters, ban_filters);
         let dt = t0.elapsed();
-        let st = SAIndex::stat();
+        let st = SAIndex::stats();
         info!(
             "sa{kind}: {} results in {dt:?}, stat {st} ({:.3}/us)",
             res.len(),
@@ -569,7 +569,7 @@ impl IllustIndex {
                 for kind in 0..5 {
                     SAIndex::set_flags(kind << 1 | 1);
                     self.sa.select(filters, ban_filters);
-                    SAIndex::stat();
+                    SAIndex::stats();
                 }
                 let dt = t0.elapsed();
                 let sum_len = filters
