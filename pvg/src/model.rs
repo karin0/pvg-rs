@@ -491,16 +491,18 @@ impl IllustIndex {
             {
                 // XXX: This handles updated illusts with intro changed as well,
                 // but the order is not perfectly preserved.
-                self.sa.insert(
-                    intro_changed_ids
-                        .iter()
-                        .map(|iid| {
-                            let o = &self.map[iid];
-                            (*iid, o.intro(&self.srv))
-                        })
-                        .collect_vec(),
-                    sa_needs_dedup,
-                );
+                if !intro_changed_ids.is_empty() {
+                    self.sa.insert(
+                        intro_changed_ids
+                            .iter()
+                            .map(|iid| {
+                                let o = &self.map[iid];
+                                (*iid, o.intro(&self.srv))
+                            })
+                            .collect_vec(),
+                        sa_needs_dedup,
+                    );
+                }
             }
         }
 
@@ -533,6 +535,19 @@ impl IllustIndex {
         delta
     }
 
+    fn do_select(&self, kind: u32, filters: &[String], ban_filters: &[String]) -> Vec<IllustId> {
+        let t0 = Instant::now();
+        let res = self.sa.select(filters, ban_filters);
+        let dt = t0.elapsed();
+        let st = SAIndex::stat();
+        info!(
+            "sa{kind}: {} results in {dt:?}, stat {st} ({:.3}/us)",
+            res.len(),
+            f64::from(st) / (dt.as_secs_f64() * 1e6)
+        );
+        res
+    }
+
     pub fn select(
         &self,
         filters: &[String],
@@ -543,17 +558,57 @@ impl IllustIndex {
         }
         #[cfg(feature = "sam")]
         {
-            let t0 = Instant::now();
-            let res = self.sa.select(filters, ban_filters);
-            let dt = t0.elapsed();
-            let st = SAIndex::stat();
-            info!(
-                "sa: {} items in {dt:?}, stat {st} ({:.3}/us)",
-                res.len(),
-                f64::from(st) / (dt.as_secs_f64() * 1e6)
-            );
+            #[cfg(feature = "sa-bench")]
+            SAIndex::set_flags(0);
+            let ans = self.do_select(0, filters, ban_filters);
 
-            Box::new(res.into_iter().map(|iid| &self.map[&iid]))
+            #[cfg(feature = "sa-bench")]
+            {
+                // Warm up
+                let t0 = Instant::now();
+                for kind in 0..5 {
+                    SAIndex::set_flags(kind << 1 | 1);
+                    self.sa.select(filters, ban_filters);
+                    SAIndex::stat();
+                }
+                let dt = t0.elapsed();
+                let sum_len = filters
+                    .iter()
+                    .chain(ban_filters.iter())
+                    .map(String::len)
+                    .sum::<usize>();
+                let num = filters.len() + ban_filters.len();
+                info!("warmed up for {num} words, {sum_len} bytes in {dt:?}");
+            }
+
+            #[cfg(feature = "sa-bench")]
+            for kind in 0..5 {
+                SAIndex::set_flags(kind << 1 | 1);
+                let res = self.do_select(kind + 1, filters, ban_filters);
+
+                if res != ans {
+                    critical!("sa{} results differ!", kind);
+
+                    let res = res.into_iter().collect::<BTreeSet<_>>();
+                    let ans = ans.iter().copied().collect::<BTreeSet<_>>();
+
+                    let a = res.difference(&ans).collect::<Vec<_>>();
+                    let n = a.len();
+                    if n > 0 {
+                        let s = a.into_iter().take(10).copied().collect::<Vec<_>>();
+                        error!("only in res ({n}): {s:?}");
+                    }
+
+                    let a = ans.difference(&res).collect::<Vec<_>>();
+                    let n = a.len();
+                    if n > 0 {
+                        let s = a.into_iter().take(10).copied().collect::<Vec<_>>();
+                        error!("only in ans ({n}): {s:?}");
+                    }
+                }
+            }
+
+            Box::new(ans.into_iter().map(move |id| &self.map[&id]))
         }
         #[cfg(not(feature = "sam"))]
         {

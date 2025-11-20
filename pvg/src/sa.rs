@@ -1,8 +1,12 @@
+use fixedbitset::FixedBitSet;
+use integer_sqrt::IntegerSquareRoot;
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
 use suffix::SuffixTable;
 
+// https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
 fn binary_search<T, F>(xs: &[T], mut pred: F) -> usize
 where
     F: FnMut(&T) -> bool,
@@ -21,18 +25,69 @@ where
 
 type Key = pixiv::IllustId;
 type Pos = u32;
+type Idx = u32;
 type Item<'a> = (Key, &'a str);
+
+type Range = (Pos, Pos);
+
+trait RangeExt {
+    fn len(&self) -> usize;
+}
+
+impl RangeExt for Range {
+    fn len(&self) -> usize {
+        (self.1 - self.0) as usize
+    }
+}
 
 struct SA {
     sa: SuffixTable<'static, 'static>,
-    indices: Vec<Pos>,     // len = total length of all strings (in bytes)
-    data: Vec<(Key, Pos)>, // len = number of strings
+    indices: Vec<Idx>, // len = N, total length of all strings (in bytes)
+    data: Vec<Key>,    // len = V, number of strings
+    starts: Vec<Pos>,  // len = V
+    #[cfg(feature = "sa-inverted")]
+    occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
+    blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
+    block_size: Pos,
 }
+
+#[cfg(feature = "sa-bench")]
+static FLAGS: AtomicU32 = AtomicU32::new(0);
 
 static STAT: AtomicU32 = AtomicU32::new(0);
 
 impl SA {
+    fn memory(&self) -> usize {
+        let n = self.size();
+
+        let r = n * (size_of::<Pos>() + size_of::<Idx>() + size_of::<u8>())
+            + self.data.len()
+                * (size_of::<Key>()
+                    + size_of::<Pos>()
+                    + self.blocks.len() / size_of::<fixedbitset::Block>())
+            + size_of::<Self>();
+
+        #[cfg(feature = "sa-bench")]
+        return r + n;
+        #[cfg(not(feature = "sa-bench"))]
+        r
+    }
+
+    fn stat(&self, dt: std::time::Duration) {
+        let n = self.size();
+        let v = self.len();
+        let sa = (n * size_of::<Pos>()) >> 10;
+        let blks = (self.blocks.len() * v / size_of::<fixedbitset::Block>()) >> 10;
+        let tot = self.memory() >> 10;
+        let b = self.block_size;
+        let d = if v > 0 { n / v } else { 0 };
+        debug!(
+            "SA: sa=indices={sa}, blocks={blks}, total={tot} KiB (n={n}={v}*{d}, b={b}) in {dt:?}"
+        );
+    }
+
     pub fn from<S: AsRef<str>, I: Iterator<Item = (Key, S)> + Clone>(iter: I) -> SA {
+        let t0 = std::time::Instant::now();
         let size = iter
             .clone()
             .map(|(_, s)| s.as_ref().len() + 1)
@@ -40,7 +95,7 @@ impl SA {
             .saturating_sub(1);
         let mut full = String::with_capacity(size);
         let mut first = true;
-        let data = iter
+        let (mut data, mut starts): (Vec<Key>, Vec<Pos>) = iter
             .clone()
             .map(|(k, s)| {
                 let s = s.as_ref();
@@ -54,8 +109,13 @@ impl SA {
                 full.push_str(s);
                 (k, start)
             })
-            .collect_vec();
+            .unzip();
+        data.shrink_to_fit();
+        starts.shrink_to_fit();
+
+        let t1 = std::time::Instant::now();
         let sa = SuffixTable::new(full);
+        debug!("SA constructed in {:?}", t1.elapsed());
 
         let indices = iter
             .enumerate()
@@ -69,13 +129,62 @@ impl SA {
             .iter()
             .map(|&p| indices[p as usize])
             .collect_vec();
-
         indices.shrink_to_fit();
 
-        SA { sa, indices, data }
+        #[cfg(feature = "sa-inverted")]
+        let occurrences = {
+            let mut occurrences: Vec<Vec<Pos>> = vec![Vec::new(); data.len()];
+            for (i, &idx) in indices.iter().enumerate() {
+                occurrences[idx as usize].push(i as Pos);
+            }
+            for occ in &mut occurrences {
+                occ.shrink_to_fit();
+            }
+            occurrences.shrink_to_fit();
+            occurrences
+        };
+
+        let n = indices.len() as Idx;
+        let (mut blocks, block_size) = if n > 0 {
+            let block_size = n.integer_sqrt().clamp(1, 10000);
+            let v = data.len();
+            let blocks = indices
+                .chunks(block_size as usize)
+                .map(|chunk| {
+                    let mut set = FixedBitSet::with_capacity(v);
+                    for &idx in chunk {
+                        set.insert(idx as usize);
+                    }
+                    set
+                })
+                .collect_vec();
+
+            (blocks, block_size)
+        } else {
+            (Vec::new(), 0)
+        };
+        blocks.shrink_to_fit();
+
+        let r = SA {
+            sa,
+            indices,
+            data,
+            starts,
+            #[cfg(feature = "sa-inverted")]
+            occurrences,
+            blocks,
+            block_size,
+        };
+
+        if n > 0 && log_enabled!(log::Level::Debug) {
+            r.stat(t0.elapsed());
+        }
+
+        r
     }
 
-    fn indices(&self, query: &str) -> &[Pos] {
+    // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
+    fn indices_range(&self, query: &str) -> Range {
         let sa = &self.sa;
         let (text, query) = (sa.text().as_bytes(), query.as_bytes());
 
@@ -84,7 +193,7 @@ impl SA {
             || (query < sa.suffix_bytes(0) && !sa.suffix_bytes(0).starts_with(query))
             || query > sa.suffix_bytes(sa.len() - 1)
         {
-            return &[];
+            return (0, 0);
         }
 
         let table = sa.table();
@@ -95,10 +204,18 @@ impl SA {
             });
 
         if start >= end {
-            &[]
+            (0, 0)
         } else {
-            &self.indices[start..end]
+            (start as Pos, end as Pos)
         }
+    }
+
+    fn indices_from_range(&self, range: Range) -> &[Idx] {
+        &self.indices[range.0 as usize..range.1 as usize]
+    }
+
+    fn indices(&self, pattern: &str) -> &[Idx] {
+        self.indices_from_range(self.indices_range(pattern))
     }
 
     fn len(&self) -> usize {
@@ -109,42 +226,34 @@ impl SA {
         self.indices.len()
     }
 
-    fn memory(&self) -> usize {
-        use std::mem::size_of;
-        let n: usize = self.size();
-        // SuffixTable: The space usage is roughly `6` bytes per character.
-        n * (6 + size_of::<Pos>() + size_of::<u8>())
-            + self.data.len() * (size_of::<Key>() + size_of::<Pos>())
-            + size_of::<Self>()
-    }
-
     fn resolve(&self, idx: u32) -> (&str, Key) {
         let idx = idx as usize;
-        let data = &self.data;
-        let (key, start) = data[idx];
+        let starts = &self.starts;
         let full = self.sa.text();
         (
             if idx + 1 < self.len() {
-                &full[start as usize..(data[idx + 1].1 - 1) as usize]
+                &full[starts[idx] as usize..(starts[idx + 1] - 1) as usize]
             } else {
-                &full[start as usize..]
+                &full[starts[idx] as usize..]
             },
-            key,
+            self.data[idx],
         )
     }
 
     fn iter(&self) -> impl Iterator<Item = Item<'_>> {
         let full = self.sa.text();
-        self.data
+        let strs = self
+            .starts
             .iter()
             .circular_tuple_windows()
-            .map(|(&(k, p1), &(_, p2))| {
+            .map(|(&p1, &p2)| {
                 if p1 < p2 {
-                    (k, &full[p1 as usize..(p2 - 1) as usize])
+                    &full[p1 as usize..(p2 - 1) as usize]
                 } else {
-                    (k, &full[p1 as usize..])
+                    &full[p1 as usize..]
                 }
-            })
+            });
+        self.data.iter().copied().zip(strs)
     }
 
     fn items(&self) -> Vec<Item<'_>> {
@@ -156,14 +265,15 @@ impl SA {
             .iter()
             .sorted_unstable()
             .dedup()
-            .map(move |idx| self.data[*idx as usize].0)
+            .map(move |idx| self.data[*idx as usize])
     }
 
     fn heuristic_select<'a>(
         &'a self,
-        min_idx: usize,
+        min_idx: Idx,
         min_indices: &'a [Pos],
         filters: &'a [String],
+        ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
         min_indices
             .iter()
@@ -171,12 +281,16 @@ impl SA {
             .dedup()
             .filter_map(move |idx| {
                 let (s, key) = self.resolve(*idx);
+                let l = s.len();
                 if filters.iter().enumerate().all(|(p, tag)| {
-                    p == min_idx || {
-                        STAT.fetch_add(s.len() as u32, Ordering::Relaxed);
+                    p as Idx == min_idx || {
+                        STAT.fetch_add(l as u32, Ordering::Relaxed);
                         s.contains(tag)
                     }
-                }) {
+                } && !ban_filters.iter().any(|tag| {
+                    STAT.fetch_add(l as u32, Ordering::Relaxed);
+                    s.contains(tag)
+                })) {
                     Some(key)
                 } else {
                     None
@@ -184,22 +298,64 @@ impl SA {
             })
     }
 
+    #[cfg(feature = "sa-inverted")]
+    fn occured_in_range(&self, idx: Idx, range: Range) -> bool {
+        let occurences = &self.occurrences[idx as usize];
+        if let Err(bound) = occurences.binary_search(&range.0) {
+            occurences.get(bound).is_some_and(|&p| p < range.1)
+        } else {
+            true
+        }
+    }
+
+    #[cfg(feature = "sa-inverted")]
+    fn binary_select<'a>(
+        &'a self,
+        all_ranges: Vec<Range>,
+        min_idx: Idx,
+        min_indices: &'a [Pos],
+        ban_filters: &'a [String],
+    ) -> impl Iterator<Item = Key> + 'a {
+        let ban_ranges = self.query_ranges(ban_filters).collect_vec();
+        min_indices
+            .iter()
+            .sorted_unstable()
+            .dedup()
+            .copied()
+            .filter_map(move |idx| {
+                if all_ranges
+                    .iter()
+                    .enumerate()
+                    .all(|(p, &range)| p as Idx == min_idx || self.occured_in_range(idx, range))
+                    && !ban_ranges
+                        .iter()
+                        .any(|&range| self.occured_in_range(idx, range))
+                {
+                    Some(self.data[idx as usize])
+                } else {
+                    None
+                }
+            })
+    }
+
+    #[cfg(feature = "sa-bench")]
     fn inverted_select<'a>(
         &'a self,
-        all_indices: Vec<&'a [Pos]>,
-        min_idx: usize,
+        all_ranges: Vec<Range>,
+        min_idx: Idx,
         min_indices: &'a [Pos],
         ban_filters: &'a [String],
     ) -> Box<dyn Iterator<Item = Key> + 'a> {
         let mut s = min_indices.iter().copied().collect::<HashSet<Pos>>();
         let mut new = HashSet::new();
 
-        for (p, indices) in all_indices.into_iter().enumerate() {
+        for (p, range) in all_ranges.into_iter().enumerate() {
             debug!("candidates: {}", s.len());
-            STAT.fetch_add(indices.len() as u32, Ordering::Relaxed);
-            if p == min_idx {
+            STAT.fetch_add(range.len() as u32, Ordering::Relaxed);
+            if p as Idx == min_idx {
                 continue;
             }
+            let indices = &self.indices[range.0 as usize..range.1 as usize];
             for &idx in indices {
                 if s.contains(&idx) {
                     new.insert(idx);
@@ -212,8 +368,8 @@ impl SA {
             new.clear();
         }
 
-        for patt in ban_filters {
-            let indices = self.indices(patt);
+        for range in ban_filters {
+            let indices = self.indices(range);
             STAT.fetch_add(indices.len() as u32, Ordering::Relaxed);
             for idx in indices {
                 s.remove(idx);
@@ -222,8 +378,126 @@ impl SA {
         Box::new(
             s.into_iter()
                 .sorted_unstable()
-                .map(move |idx| self.data[idx as usize].0),
+                .map(move |idx| self.data[idx as usize]),
         )
+    }
+
+    #[cfg(feature = "sa-bench")]
+    fn inverted_ban_select<'a>(
+        &'a self,
+        ban_filters: &'a [String],
+    ) -> impl Iterator<Item = Key> + 'a {
+        // Inverted selection is more suitable for negated filters.
+        let ban_idxs = ban_filters
+            .iter()
+            .flat_map(|patt| self.indices(patt))
+            .collect::<HashSet<_>>();
+        STAT.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
+        self.iter().enumerate().filter_map(move |(idx, (key, _))| {
+            if ban_idxs.contains(&(idx as Pos)) {
+                None
+            } else {
+                Some(key)
+            }
+        })
+    }
+
+    fn join_blocks(&self, l: Pos, r: Pos) -> FixedBitSet {
+        let b = self.block_size;
+        let start = l.div_ceil(b);
+        let end = r / b;
+        let mut res = FixedBitSet::with_capacity(self.len());
+
+        let bound = r.min(start * b);
+        if l < bound {
+            for &idx in &self.indices[l as usize..bound as usize] {
+                res.insert(idx as usize);
+            }
+        }
+        if r <= bound {
+            return res;
+        }
+        let bound = l.max(end * b);
+        if bound < r {
+            for &idx in &self.indices[bound as usize..r as usize] {
+                res.insert(idx as usize);
+            }
+        }
+        if start < end {
+            let blocks = end - start;
+            STAT.fetch_add(blocks, Ordering::Relaxed);
+            debug!("joining {blocks} blocks");
+            for b in &self.blocks[start as usize..end as usize] {
+                res.union_with(b);
+            }
+        }
+
+        res
+    }
+
+    fn block_select(
+        &self,
+        ranges: impl Iterator<Item = Range>,
+        ban_filters: &[String],
+    ) -> impl Iterator<Item = Key> {
+        let v = self.len();
+        let mut res = FixedBitSet::with_capacity(v);
+        res.insert_range(0..v);
+        for (l, r) in ranges {
+            res.intersect_with(&self.join_blocks(l, r));
+        }
+        for f in ban_filters {
+            let (l, r) = self.indices_range(f);
+            res.difference_with(&self.join_blocks(l, r));
+        }
+        res.ones()
+            .map(|idx| self.data[idx])
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn block_ban_select(
+        &self,
+        ban_ranges: impl Iterator<Item = Range>,
+    ) -> impl Iterator<Item = Key> {
+        let v = self.len();
+        let mut set = FixedBitSet::with_capacity(v);
+        for (l, r) in ban_ranges {
+            set.union_with(&self.join_blocks(l, r));
+        }
+        self.iter().enumerate().filter_map(
+            move |(idx, (key, _))| {
+                if set.contains(idx) { None } else { Some(key) }
+            },
+        )
+    }
+
+    #[cfg(feature = "sa-bench")]
+    fn brute_select(
+        &self,
+        ranges: impl Iterator<Item = Range>,
+        ban_ranges: impl Iterator<Item = Range>,
+    ) -> impl Iterator<Item = Key> {
+        use std::collections::BTreeSet;
+        let mut s = BTreeSet::new();
+        s.extend(0..self.len() as Pos);
+        for range in ranges {
+            let indices = self.indices_from_range(range);
+            let t = indices.iter().copied().collect::<BTreeSet<_>>();
+            STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
+            s = s.intersection(&t).copied().collect();
+        }
+        for range in ban_ranges {
+            let indices = self.indices_from_range(range);
+            let t: BTreeSet<u32> = indices.iter().copied().collect::<BTreeSet<_>>();
+            STAT.fetch_add(t.len() as u32, Ordering::Relaxed);
+            s = s.difference(&t).copied().collect();
+        }
+        s.into_iter().map(|idx| self.data[idx as usize])
+    }
+
+    fn query_ranges(&self, patterns: &[String]) -> impl Iterator<Item = Range> {
+        patterns.iter().map(|patt| self.indices_range(patt))
     }
 
     fn select<'a>(
@@ -231,70 +505,110 @@ impl SA {
         filters: &'a [String],
         ban_filters: &'a [String],
     ) -> Box<dyn Iterator<Item = Key> + 'a> {
+        #[cfg(feature = "sa-bench")]
+        let flags = FLAGS.load(Ordering::Relaxed) & 0xf;
+
+        #[cfg(feature = "sa-bench")]
+        if flags == 0x9 {
+            debug!("forced brute select");
+            return Box::new(
+                self.brute_select(self.query_ranges(filters), self.query_ranges(ban_filters)),
+            );
+        }
+
+        if self.block_size == 0 {
+            return Box::new(std::iter::empty());
+        }
+
         match filters.len() {
             0 => {
-                // Inverted selection is more suitable for negated filters.
-                let ban_idxs = ban_filters
-                    .iter()
-                    .flat_map(|patt| self.indices(patt))
-                    .collect::<HashSet<_>>();
-                STAT.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
-                return Box::new(self.iter().enumerate().filter_map(move |(idx, (key, _))| {
-                    if ban_idxs.contains(&(idx as Pos)) {
-                        None
-                    } else {
-                        Some(key)
-                    }
-                }));
+                #[cfg(feature = "sa-bench")]
+                if flags == 0x5 {
+                    debug!("forced inverted ban select");
+                    return Box::new(self.inverted_ban_select(ban_filters));
+                }
+                return Box::new(self.block_ban_select(self.query_ranges(ban_filters)));
             }
             1 => {
-                if ban_filters.is_empty() {
+                #[cfg(feature = "sa-bench")]
+                let cond = flags == 0 && ban_filters.is_empty();
+                #[cfg(not(feature = "sa-bench"))]
+                let cond = ban_filters.is_empty();
+                if cond {
                     return Box::new(self.single_select(&filters[0]));
                 }
             }
             _ => {}
         }
 
-        let all: Vec<&[Pos]> = filters
-            .iter()
-            .map(|patt| self.indices(patt))
-            .collect::<Vec<_>>();
+        let all = self.query_ranges(filters);
 
-        let (p, a) = all
+        #[cfg(feature = "sa-bench")]
+        if flags == 0x7 {
+            debug!("forced block select");
+            return Box::new(self.block_select(all, ban_filters));
+        }
+
+        let all = all.collect_vec();
+        let (min_idx, &min) = all
             .iter()
-            .copied()
             .enumerate()
             .min_by_key(|(_, poses)| poses.len())
             .unwrap();
 
-        let a_len = a.len();
+        let min_idx = min_idx as Idx;
+        let min_len = min.len();
 
-        if a_len == 0 {
+        if min_len == 0 {
             return Box::new(std::iter::empty());
         }
 
-        let sum_len = if log_enabled!(log::Level::Debug) {
-            let lens = all.iter().map(|v| v.len()).collect_vec();
-            let sum_len: usize = lens.iter().sum();
-            let c = a.len() as f64 / sum_len as f64;
-            debug!("indices lengths: {lens:?}, c = {c:.3}");
-            if !ban_filters.is_empty() {
-                return self.inverted_select(all, p, a, ban_filters);
-            }
-            sum_len
-        } else {
-            if !ban_filters.is_empty() {
-                return self.inverted_select(all, p, a, ban_filters);
-            }
-            all.iter().map(|v| v.len()).sum::<usize>()
-        };
+        let min_indices = self.indices_from_range(min);
 
-        // c >= 0.25
-        if a.len() * 4 >= sum_len {
-            return self.inverted_select(all, p, a, ban_filters);
+        #[cfg(feature = "sa-bench")]
+        if flags == 0x1 {
+            debug!("forced heuristic selection");
+            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
         }
 
-        Box::new(self.heuristic_select(p, a, filters))
+        if log_enabled!(log::Level::Debug) {
+            let lens = all.iter().map(RangeExt::len).collect_vec();
+            let sum_len: usize = lens.iter().sum();
+            let c = min_len as f64 / sum_len as f64;
+            debug!("indices lengths: {lens:?}, c = {c:.6}");
+        }
+
+        #[cfg(feature = "sa-bench")]
+        if flags == 0x5 {
+            debug!("forced inverted selection");
+            return self.inverted_select(all, min_idx, min_indices, ban_filters);
+        }
+
+        #[cfg(all(feature = "sa-bench", feature = "sa-inverted"))]
+        if flags == 0x3 {
+            debug!("forced binary selection");
+            return Box::new(self.binary_select(all, min_idx, min_indices, ban_filters));
+        }
+
+        if min_len <= 150 {
+            #[cfg(feature = "sa-inverted")]
+            return {
+                let pattern_len: usize = filters
+                    .iter()
+                    .chain(ban_filters.iter())
+                    .map(String::len)
+                    .sum();
+                if pattern_len >= 80 {
+                    Box::new(self.binary_select(all, min_idx, min_indices, ban_filters))
+                } else {
+                    Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters))
+                }
+            };
+            #[cfg(not(feature = "sa-inverted"))]
+            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
+        }
+
+        Box::new(self.block_select(all.into_iter(), ban_filters))
     }
 }
 
@@ -351,6 +665,11 @@ impl Index {
             minor: None,
             dedup: false,
         }
+    }
+
+    #[cfg(feature = "sa-bench")]
+    pub fn set_flags(flags: u32) {
+        FLAGS.store(flags, Ordering::Relaxed);
     }
 
     pub fn stat() -> u32 {
