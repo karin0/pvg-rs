@@ -106,43 +106,56 @@ impl Indices {
     }
 
     #[inline]
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    #[inline]
-    fn by_range(&self, range: Range) -> &[Idx] {
-        &self.inner[range.0 as usize..range.1 as usize]
-    }
-
-    #[inline]
-    fn join_blocks(&self, l: Pos, r: Pos) -> FixedBitSet {
+    fn join_blocks(&self, range: Range, v: Idx) -> FixedBitSet {
+        let (l, r) = range;
         let b = self.block_size;
         let start = l.div_ceil(b);
         let end = r / b;
-        let mut res = FixedBitSet::with_capacity(self.len());
 
         let bound = r.min(start * b);
-        if l < bound {
-            for &idx in &self.inner[l as usize..bound as usize] {
-                res.insert(idx as usize);
-            }
-        }
         if r <= bound {
+            // Same block, r == bound.
+            let mut res = FixedBitSet::with_capacity(v as usize);
+            for &idx in &self.inner[l as usize..r as usize] {
+                // Safety: `res.len()` == `v`, and all indices are < `v`.
+                unsafe {
+                    res.insert_unchecked(idx as usize);
+                }
+            }
             return res;
         }
-        let bound = l.max(end * b);
-        if bound < r {
-            for &idx in &self.inner[bound as usize..r as usize] {
-                res.insert(idx as usize);
-            }
-        }
+
+        let mut res;
         if start < end {
             let blocks = end - start;
             STATS.fetch_add(blocks, Ordering::Relaxed);
             debug!("joining {blocks} blocks");
-            for b in &self.blocks[start as usize..end as usize] {
+
+            // Safety: `start < end` ensures at least one block exists.
+            let (first, rest) = unsafe {
+                self.blocks[start as usize..end as usize]
+                    .split_first()
+                    .unwrap_unchecked()
+            };
+
+            res = first.clone();
+            for b in rest {
                 res.union_with(b);
+            }
+        } else {
+            res = FixedBitSet::with_capacity(v as usize);
+        }
+
+        for &idx in &self.inner[l as usize..bound as usize] {
+            unsafe {
+                res.insert_unchecked(idx as usize);
+            }
+        }
+
+        let bound = l.max(end * b);
+        for &idx in &self.inner[bound as usize..r as usize] {
+            unsafe {
+                res.insert_unchecked(idx as usize);
             }
         }
 
@@ -164,7 +177,7 @@ impl std::ops::Index<Range> for Indices {
     type Output = [Idx];
 
     fn index(&self, range: Range) -> &Self::Output {
-        self.by_range(range)
+        &self.inner[range.0 as usize..range.1 as usize]
     }
 }
 
@@ -351,9 +364,10 @@ impl SA {
         }
     }
 
+    #[cfg(feature = "sa-inverted")]
     #[inline]
     fn indices(&self, pattern: &str) -> &[Idx] {
-        self.indices.by_range(self.indices_range(pattern))
+        &self.indices[self.indices_range(pattern)]
     }
 
     #[inline]
@@ -363,7 +377,7 @@ impl SA {
 
     #[inline]
     fn size(&self) -> usize {
-        self.indices.len()
+        self.sa.len()
     }
 
     #[inline]
@@ -391,12 +405,13 @@ impl SA {
         }
     }
 
-    fn single_select<'a>(&'a self, pattern: &str) -> impl Iterator<Item = Key> + 'a {
-        self.indices(pattern)
+    fn single_select(&self, range: Range) -> impl Iterator<Item = Key> + '_ {
+        self.indices[range]
             .iter()
             .sorted_unstable()
             .dedup()
-            .map(move |idx| self.data[*idx as usize])
+            .copied()
+            .map(move |idx| self.data[idx as usize])
     }
 
     fn heuristic_select<'a>(
@@ -410,8 +425,9 @@ impl SA {
             .iter()
             .sorted_unstable()
             .dedup()
+            .copied()
             .filter_map(move |idx| {
-                let (s, key) = self.resolve(*idx);
+                let (s, key) = self.resolve(idx);
                 let l = s.len();
                 if filters.iter().enumerate().all(|(p, tag)| {
                     p as Idx == min_idx || {
@@ -509,7 +525,6 @@ impl SA {
         &'a self,
         ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
-        // Inverted selection is more suitable for negated filters.
         let ban_idxs = ban_filters
             .iter()
             .flat_map(|patt| self.indices(patt))
@@ -526,18 +541,22 @@ impl SA {
 
     fn block_select(
         &self,
-        ranges: impl Iterator<Item = Range>,
+        mut ranges: impl Iterator<Item = Range>,
         ban_filters: &[String],
     ) -> impl Iterator<Item = Key> {
         let v = self.len();
-        let mut res = FixedBitSet::with_capacity(v);
-        res.insert_range(0..v);
-        for (l, r) in ranges {
-            res.intersect_with(&self.indices.join_blocks(l, r));
+        let mut res;
+        if let Some(range) = ranges.next() {
+            res = self.indices.join_blocks(range, v as Idx);
+            for range in ranges {
+                res.intersect_with(&self.indices.join_blocks(range, v as Idx));
+            }
+        } else {
+            res = FixedBitSet::with_capacity(v);
+            res.insert_range(0..v);
         }
         for f in ban_filters {
-            let (l, r) = self.indices_range(f);
-            res.difference_with(&self.indices.join_blocks(l, r));
+            res.difference_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
         }
         res.ones()
             .map(|idx| self.data[idx])
@@ -545,20 +564,26 @@ impl SA {
             .into_iter()
     }
 
-    fn block_ban_select(
-        &self,
-        ban_ranges: impl Iterator<Item = Range>,
-    ) -> impl Iterator<Item = Key> {
+    fn single_block_select(&self, range: Range) -> impl Iterator<Item = Key> {
+        self.indices
+            .join_blocks(range, self.len() as Idx)
+            .ones()
+            .map(|idx| self.data[idx])
+            .collect_vec()
+            .into_iter()
+    }
+
+    fn block_ban_select(&self, ban_filters: &[String]) -> impl Iterator<Item = Key> {
         let v = self.len();
         let mut set = FixedBitSet::with_capacity(v);
-        for (l, r) in ban_ranges {
-            set.union_with(&self.indices.join_blocks(l, r));
+        for f in ban_filters {
+            let range = self.indices_range(f);
+            set.union_with(&self.indices.join_blocks(range, v as Idx));
         }
-        self.data.iter().enumerate().filter_map(
-            move |(idx, &key)| {
-                if set.contains(idx) { None } else { Some(key) }
-            },
-        )
+        set.zeroes()
+            .map(|idx| self.data[idx])
+            .collect_vec()
+            .into_iter()
     }
 
     #[cfg(feature = "sa-bench")]
@@ -613,18 +638,22 @@ impl SA {
             0 => {
                 #[cfg(feature = "sa-bench")]
                 if flags == 0x5 {
-                    debug!("forced inverted ban select");
+                    debug!("forced inverted_ban_select");
                     return Box::new(self.inverted_ban_select(ban_filters));
                 }
-                return Box::new(self.block_ban_select(self.query_ranges(ban_filters)));
+                return Box::new(self.block_ban_select(ban_filters));
             }
             1 => {
                 #[cfg(feature = "sa-bench")]
-                let cond = flags == 0 && ban_filters.is_empty();
+                let cond = flags == 0;
                 #[cfg(not(feature = "sa-bench"))]
-                let cond = ban_filters.is_empty();
-                if cond {
-                    return Box::new(self.single_select(&filters[0]));
+                let cond = true;
+                if cond && ban_filters.is_empty() {
+                    let range = self.indices_range(&filters[0]);
+                    if range.len() >= 3000 {
+                        return Box::new(self.single_block_select(range));
+                    }
+                    return Box::new(self.single_select(range));
                 }
             }
             _ => {}
@@ -634,7 +663,7 @@ impl SA {
 
         #[cfg(feature = "sa-bench")]
         if flags == 0x7 {
-            debug!("forced block select");
+            debug!("forced block_select");
             return Box::new(self.block_select(all, ban_filters));
         }
 
@@ -652,14 +681,6 @@ impl SA {
             return Box::new(std::iter::empty());
         }
 
-        let min_indices = &self.indices[min];
-
-        #[cfg(feature = "sa-bench")]
-        if flags == 0x1 {
-            debug!("forced heuristic selection");
-            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
-        }
-
         if log_enabled!(log::Level::Debug) {
             let lens = all.iter().map(RangeExt::len).collect_vec();
             let sum_len: usize = lens.iter().sum();
@@ -667,15 +688,23 @@ impl SA {
             debug!("indices lengths: {lens:?}, c = {c:.6}");
         }
 
+        let min_indices = &self.indices[min];
+
+        #[cfg(feature = "sa-bench")]
+        if flags == 0x1 {
+            debug!("forced heuristic_select");
+            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
+        }
+
         #[cfg(feature = "sa-bench")]
         if flags == 0x5 {
-            debug!("forced inverted selection");
+            debug!("forced inverted_select");
             return self.inverted_select(all, min_idx, min_indices, ban_filters);
         }
 
         #[cfg(all(feature = "sa-bench", feature = "sa-inverted"))]
         if flags == 0x3 {
-            debug!("forced binary selection");
+            debug!("forced binary_select");
             return Box::new(self.binary_select(all, min_idx, min_indices, ban_filters));
         }
 
