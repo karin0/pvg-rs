@@ -196,7 +196,7 @@ impl Pvg {
         serde_json::to_string(&cache)
     }
 
-    async fn save_cache(&self) -> Result<()> {
+    pub async fn save_cache(&self) -> Result<()> {
         let s = self.dump_cache().await?;
         let len = s.len();
         tokio::fs::write(&self.conf.cache_file, s).await?;
@@ -205,11 +205,6 @@ impl Pvg {
             len,
             self.conf.cache_file.display()
         );
-        Ok(())
-    }
-
-    pub async fn save(&self) -> Result<()> {
-        self.save_cache().await?;
         Ok(())
     }
 
@@ -609,26 +604,31 @@ impl Pvg {
         r
     }
 
-    pub async fn download_all(&self) -> Result<i32> {
+    pub async fn download_all(&self) -> Result<u32> {
         let _ = self.download_all_lock.try_lock()?;
-        // FIXME: generate the whole queue in sync for now to avoid the use of async locks.
         let q = self.make_download_queue().await;
-        self._download_all(q).await
+        let (r, dirty_404) = self._download_all(q).await?;
+        if dirty_404 {
+            self.save_cache().await?;
+        }
+        Ok(r)
     }
 
-    async fn download_all_worker(&self, ids: &[IllustId]) -> Result<i32> {
+    async fn download_all_worker(&self, ids: &[IllustId]) -> Result<u32> {
         let _ = self.download_all_lock.try_lock()?;
         let q = self.make_download_queue_from(ids).await;
-        self._download_all(q).await
+
+        // The caller saves the cache anyway.
+        self._download_all(q).await.map(|(n, _)| n)
     }
 
-    async fn _download_all(&self, q: Vec<(String, PathBuf)>) -> Result<i32> {
+    async fn _download_all(&self, q: Vec<(String, PathBuf)>) -> Result<(u32, bool)> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
         if q.is_empty() {
             debug!("no pages to download");
-            return Ok(0);
+            return Ok((0, false));
         }
         debug!("{} pages to download", q.len());
         let mut futs = q
@@ -636,8 +636,8 @@ impl Pvg {
             .map(|(url, path)| self._downloader(url, path))
             .collect::<FuturesUnordered<_>>();
         let n = futs.len();
-        let mut cnt = 0;
-        let mut cnt_fail = 0;
+        let mut cnt: u32 = 0;
+        let mut cnt_fail: u32 = 0;
         let mut the_404 = vec![];
         while let Some((path, res)) = futs.next().await {
             cnt += 1;
@@ -666,15 +666,23 @@ impl Pvg {
             }
         }
         drop(futs);
+        let mut dirty_404 = false;
         if !the_404.is_empty() {
-            warn!("collecting {} not_founds", the_404.len());
-            self.not_found.lock().extend(the_404.into_iter());
+            let mut not_found = self.not_found.lock();
+            let old_len = not_found.len();
+            let cur_len = the_404.len();
+            not_found.extend(the_404.into_iter());
+            let new_len = not_found.len();
+            if new_len > old_len {
+                warn!("collected {} not_founds (+{})", cur_len, new_len - old_len);
+                dirty_404 = true;
+            }
         }
         if cnt_fail > 0 {
             bail!("failed to download {cnt_fail} pages out from {cnt}");
         }
         info!("downloaded {cnt} pages");
-        Ok(cnt)
+        Ok((cnt, dirty_404))
     }
 }
 

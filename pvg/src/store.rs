@@ -102,12 +102,14 @@ impl Store {
             .push(" ON CONFLICT(iid) DO UPDATE SET data = excluded.data, iid = excluded.iid");
 
         let r = query.build().execute(&self.pool).await?;
-        info!(
-            "upsert took {:?}: affected={:?} rowid={}",
-            t0.elapsed(),
-            r.rows_affected(),
-            r.last_insert_rowid()
-        );
+        if log_enabled!(log::Level::Debug) {
+            debug!(
+                "upsert took {:?}: affected={:?} rowid={}",
+                t0.elapsed(),
+                r.rows_affected(),
+                r.last_insert_rowid()
+            );
+        }
         Ok(())
     }
 
