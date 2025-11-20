@@ -36,6 +36,7 @@ lz4 = "1"
 string-interner = "0.19"
 fixedbitset = "0.5"
 integer-sqrt = "0.1"
+similar = { version = "2", optional = true }
 
 dhat = { version = "0.3", optional = true }
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
@@ -54,3 +55,4 @@ dhat-heap = ["dep:dhat"]
 sam = ["dep:suffix"]
 sa-bench = []
 sa-inverted = []
+diff = ["dep:similar"]
