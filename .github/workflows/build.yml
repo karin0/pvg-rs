@@ -42,9 +42,9 @@ jobs:
         if: runner.os == 'Windows'
         with:
           path-type: inherit
-          install: ${{ github.event_name == 'release' && 'zip' || 'false' }}
+          install: ${{ github.event_name == 'release' && 'zip sqlite' || 'sqlite' }}
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Use GNU tar for cache
         if: runner.os == 'Windows'
@@ -81,6 +81,10 @@ jobs:
       - name: Build ${{ matrix.target }}
         run: |
           set -e
+
+          sqlite3 fav.db < schema.sql
+          export DATABASE_URL=sqlite://fav.db?mode=ro
+
           cargo update
           target=${{ matrix.target }}
           ${CARGO:=cargo} build --release --target $target
