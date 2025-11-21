@@ -1,6 +1,5 @@
 use crate::critical;
 use crate::illust::{IllustData, IllustService};
-use crate::sa::Query;
 use crate::store::Store;
 use crate::util::normalized;
 use anyhow::{Context, Result, bail};
@@ -17,7 +16,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 #[cfg(feature = "sam")]
-use crate::sa::Index as SAIndex;
+use crate::search::{Index as SearchIndex, Query};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Dimensions(pub NonZeroU32, pub NonZeroU32);
@@ -127,7 +126,7 @@ pub struct IllustIndex {
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     stages: [IllustStage; 2],
     #[cfg(feature = "sam")]
-    sa: SAIndex,
+    sa: SearchIndex,
     disable_select: bool,
 }
 
@@ -302,9 +301,9 @@ impl IllustIndex {
 
         #[cfg(feature = "sam")]
         let sa = if disable_select {
-            SAIndex::default()
+            SearchIndex::default()
         } else {
-            SAIndex::new(ids.iter().map(|id| (*id, map[id].intro(&srv))))
+            SearchIndex::new(ids.iter().map(|id| (*id, map[id].intro(&srv))))
         };
 
         #[cfg(feature = "sam")]
@@ -620,7 +619,7 @@ impl IllustIndex {
             // Clear the index to alert.
             #[cfg(feature = "sam")]
             if !self.disable_select {
-                self.sa = SAIndex::default();
+                self.sa = SearchIndex::default();
             }
 
             return 0;
@@ -682,7 +681,7 @@ impl IllustIndex {
         let t0 = Instant::now();
         let res = self.sa.select(query);
         let dt = t0.elapsed();
-        let st = SAIndex::stats();
+        let st = SearchIndex::stats();
         info!(
             "sa{kind}: {} results in {dt:?}, stat {st} ({:.3}/us)",
             res.len(),
@@ -704,7 +703,7 @@ impl IllustIndex {
         #[cfg(feature = "sam")]
         {
             #[cfg(feature = "sa-bench")]
-            SAIndex::set_flags(0);
+            SearchIndex::set_flags(0);
             let ans = self.do_select(0, query);
 
             #[cfg(feature = "sa-bench")]
@@ -712,9 +711,9 @@ impl IllustIndex {
                 // Warm up
                 let t0 = Instant::now();
                 for kind in 0..5 {
-                    SAIndex::set_flags(kind << 1 | 1);
+                    SearchIndex::set_flags(kind << 1 | 1);
                     self.sa.select(query);
-                    SAIndex::stats();
+                    SearchIndex::stats();
                 }
                 let dt = t0.elapsed();
                 let sum_len = filters
@@ -728,7 +727,7 @@ impl IllustIndex {
 
             #[cfg(feature = "sa-bench")]
             for kind in 0..5 {
-                SAIndex::set_flags(kind << 1 | 1);
+                SearchIndex::set_flags(kind << 1 | 1);
 
                 let res = self.do_select(kind + 1, query);
 

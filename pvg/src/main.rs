@@ -12,10 +12,7 @@ mod upscale;
 mod util;
 
 #[cfg(feature = "sam")]
-mod sa;
-
-#[cfg(feature = "fm-index")]
-mod fm_index;
+mod search;
 
 use crate::core::Pvg;
 use crate::util::normalized;
@@ -179,31 +176,18 @@ struct UserResponse<'a> {
 struct EnvResponse<'a> {
     user: UserResponse<'a>,
     ver: &'static str,
-    features: Vec<&'static str>,
+    features: &'static str,
 }
 
 const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
 
 fn do_get_env(app: &Pvg) -> EnvResponse<'_> {
-    let features = vec![
-        #[cfg(feature = "io-uring")]
-        "io-uring",
-        #[cfg(feature = "image")]
-        "image",
-        #[cfg(feature = "rename2")]
-        "rename2",
-        #[cfg(feature = "dhat-heap")]
-        "dhat-heap",
-        #[cfg(feature = "sam")]
-        "sam",
-    ];
-
     let r = EnvResponse {
         user: UserResponse {
             name: &app.conf.username,
         },
         ver: VERSION,
-        features,
+        features: env!("PVG_FEATURES"),
     };
     info!("env: {r:?}");
     r
