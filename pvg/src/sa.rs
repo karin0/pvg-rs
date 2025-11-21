@@ -1,3 +1,4 @@
+use bio::data_structures::suffix_array::suffix_array;
 use fixedbitset::FixedBitSet;
 use integer_sqrt::IntegerSquareRoot;
 use itertools::Itertools;
@@ -5,9 +6,15 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-use suffix::SuffixTable;
+
+#[cfg(feature = "fm-index")]
+use crate::fm_index::FMIndex;
+
+#[cfg(feature = "fm-bench")]
+use std::sync::atomic::AtomicU64;
 
 // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
+#[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
 fn binary_search<T, F>(xs: &[T], mut pred: F) -> usize
 where
     F: FnMut(&T) -> bool,
@@ -51,7 +58,18 @@ struct Indices {
 }
 
 impl Indices {
-    fn new<S: AsRef<str>, I: Iterator<Item = S>>(iter: I, v: Idx, sa: &[Pos]) -> Indices {
+    fn memory(&self, v: usize) -> (usize, usize) {
+        let n = self.inner.len();
+        let blocks = self.blocks.len() * v / size_of::<fixedbitset::Block>();
+        let r = n * size_of::<Idx>() + blocks + size_of::<Self>();
+
+        #[cfg(feature = "sa-inverted")]
+        let r = r + n;
+
+        (r, blocks)
+    }
+
+    fn new<S: AsRef<str>, I: Iterator<Item = S>>(iter: I, v: Idx, sa: &[usize]) -> Indices {
         let raw_indices = iter
             .enumerate()
             .flat_map(|(idx, s)| {
@@ -59,7 +77,7 @@ impl Indices {
             })
             .collect_vec();
 
-        let mut indices = sa.iter().map(|&p| raw_indices[p as usize]).collect_vec();
+        let mut indices = sa.iter().map(|&p| raw_indices[p]).collect_vec();
         drop(raw_indices);
         indices.shrink_to_fit();
 
@@ -181,12 +199,6 @@ impl std::ops::Index<Range> for Indices {
     }
 }
 
-struct Stub {
-    full: String,
-    starts: Vec<Pos>,
-    data: Vec<Key>,
-}
-
 fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a str> + 'a {
     starts
         .iter()
@@ -200,77 +212,157 @@ fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a 
         })
 }
 
+struct Stub {
+    full: String,     // len = N
+    starts: Vec<Pos>, // len = V, number of strings
+    data: Vec<Key>,   // len = V
+}
+
 impl Stub {
+    fn memory(&self) -> usize {
+        self.full.len() * size_of::<u8>()
+            + self.starts.len() * size_of::<Pos>()
+            + self.data.len() * size_of::<Key>()
+            + size_of::<Self>()
+    }
+
+    #[inline]
     fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
         let strs = iter_parts(&self.full, &self.starts);
         self.data.iter().copied().zip(strs)
     }
+
+    #[inline]
+    fn resolve(&self, idx: u32) -> (&str, Key) {
+        let idx = idx as usize;
+        let starts = &self.starts;
+        let full = &self.full;
+        (
+            if idx + 1 < self.data.len() {
+                &full[starts[idx] as usize..(starts[idx + 1] - 1) as usize]
+            } else {
+                &full[starts[idx] as usize..]
+            },
+            self.data[idx],
+        )
+    }
 }
 
-struct SA {
-    sa: SuffixTable<'static, 'static>,
-    data: Vec<Key>,   // len = V, number of strings
-    starts: Vec<Pos>, // len = V
-    indices: Indices,
-}
+static STATS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(feature = "sa-bench")]
 static FLAGS: AtomicU32 = AtomicU32::new(0);
 
-static STATS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "fm-bench")]
+static PERF_SA: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "fm-bench")]
+static PERF_FM: AtomicU64 = AtomicU64::new(0);
+
+struct SA {
+    #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+    sa: Vec<Pos>, // len = N
+    #[cfg(feature = "fm-index")]
+    fm: FMIndex,
+    inner: Stub,
+    indices: Indices,
+}
 
 impl SA {
     fn memory(&self) -> usize {
-        let n = self.size();
+        let mut r = self.inner.memory() + self.indices.memory(self.len()).0 + size_of::<Self>();
 
-        let r = n * (size_of::<Pos>() + size_of::<Idx>() + size_of::<u8>())
-            + self.data.len()
-                * (size_of::<Key>()
-                    + size_of::<Pos>()
-                    + self.indices.blocks.len() / size_of::<fixedbitset::Block>())
-            + size_of::<Self>();
+        #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+        {
+            r += self.sa.len() * size_of::<Pos>();
+        }
 
-        #[cfg(feature = "sa-bench")]
-        return r + n;
-        #[cfg(not(feature = "sa-bench"))]
+        #[cfg(feature = "fm-index")]
+        {
+            r += self.fm.memory();
+        }
+
         r
     }
 
     fn stats(&self, dt: Duration) {
         let n = self.size();
         let v = self.len();
-        let sa = (n * size_of::<Pos>()) >> 10;
-        let blks = (self.indices.blocks.len() * v / size_of::<fixedbitset::Block>()) >> 10;
-        let tot = self.memory() >> 10;
+
+        let (indices, blocks) = self.indices.memory(v);
+        let indices = (indices - blocks) >> 20;
+        let blocks = blocks >> 20;
+
+        #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+        let sa = (self.sa.len() * size_of::<Pos>()) >> 20;
+        #[cfg(not(any(feature = "fm-bench", not(feature = "fm-index"))))]
+        let sa = 0;
+
+        #[cfg(feature = "fm-index")]
+        let fm = self.fm.memory() >> 20;
+
+        #[cfg(not(feature = "fm-index"))]
+        let fm = 0;
+
+        let tot = self.memory() >> 20;
+
         let b = self.indices.block_size;
         let d = if v > 0 { n / v } else { 0 };
         debug!(
-            "SA: sa=indices={sa}, blocks={blks}, total={tot} KiB (n={n}={v}*{d}, b={b}) in {dt:?}"
+            "SA: n={n}={v}*{d}, sa={sa}, fm={fm}, indices={indices}, blocks={blocks} ({b}), total={tot} MiB in {dt:?}"
         );
     }
 
     fn from_inner(mut stub: Stub, t0: Instant) -> Self {
-        stub.full.shrink_to_fit();
         stub.data.shrink_to_fit();
         stub.starts.shrink_to_fit();
 
+        let n = stub.full.len();
+
+        stub.full.push('\0');
+        let text = stub.full.as_bytes();
+
         let t1 = Instant::now();
-        let sa = SuffixTable::new(stub.full);
-        debug!("SA table constructed in {:?}", t1.elapsed());
+        let sa = suffix_array(text);
+        debug!("SA constructed in {:?}", t1.elapsed());
+
+        let table = &sa[1..];
+        assert_eq!(table.len(), n);
 
         let t1 = Instant::now();
         let indices = Indices::new(
-            iter_parts(sa.text(), &stub.starts),
+            iter_parts(&stub.full, &stub.starts),
             stub.data.len() as Idx,
-            sa.table(),
+            table,
         );
         debug!("Indices constructed in {:?}", t1.elapsed());
 
+        #[cfg(feature = "fm-index")]
+        let fm = {
+            use bio::data_structures::bwt::bwt;
+
+            let t1 = Instant::now();
+            let bwt = bwt(text, &sa);
+            #[cfg(not(feature = "fm-bench"))]
+            drop(sa);
+            let r = FMIndex::new(text, bwt);
+            debug!("FMIndex constructed in {:?}", t1.elapsed());
+            r
+        };
+
+        #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+        let sa = table.iter().copied().map(|x| x as Pos).collect_vec();
+
+        stub.full.pop();
+        stub.full.shrink_to_fit();
+
         let dt = t0.elapsed();
         let r = SA {
+            #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
             sa,
-            data: stub.data,
-            starts: stub.starts,
+            #[cfg(feature = "fm-index")]
+            fm,
+            inner: stub,
             indices,
         };
 
@@ -285,6 +377,7 @@ impl SA {
             .iter()
             .map(|(_, s)| s.as_ref().len() + 1)
             .sum::<usize>()
+            + 1
     }
 
     fn from_iter<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(iter: I) -> Self {
@@ -337,31 +430,87 @@ impl SA {
         SA::from_inner(inner, t0)
     }
 
-    // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
-    fn indices_range(&self, query: &str) -> Range {
-        let sa = &self.sa;
-        let (text, query) = (sa.text().as_bytes(), query.as_bytes());
+    #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+    fn suffix_bytes(&self, i: usize) -> &[u8] {
+        &self.inner.full.as_bytes()[self.sa[i] as usize..]
+    }
 
+    // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
+    #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
+    fn indices_range_sa(&self, query: &str) -> Range {
+        #[cfg(feature = "fm-bench")]
+        let t0 = Instant::now();
+
+        let (text, query) = (self.inner.full.as_bytes(), query.as_bytes());
         if text.is_empty()
             || query.is_empty()
-            || (query < sa.suffix_bytes(0) && !sa.suffix_bytes(0).starts_with(query))
-            || query > sa.suffix_bytes(sa.len() - 1)
+            || (query < self.suffix_bytes(0) && !self.suffix_bytes(0).starts_with(query))
+            || query > self.suffix_bytes(text.len() - 1)
         {
             return (0, 0);
         }
 
-        let table = sa.table();
+        let table = &self.sa;
         let start = binary_search(table, |&sufi| query <= &text[sufi as usize..]);
         let end = start
             + binary_search(&table[start..], |&sufi| {
                 !text[sufi as usize..].starts_with(query)
             });
 
-        if start >= end {
+        let r = if start >= end {
             (0, 0)
         } else {
             (start as Pos, end as Pos)
+        };
+
+        #[cfg(feature = "fm-bench")]
+        {
+            let dt = t0.elapsed();
+            PERF_SA.fetch_add(dt.as_nanos() as u64, Ordering::Relaxed);
         }
+        r
+    }
+
+    #[cfg(feature = "fm-index")]
+    fn indices_range_fm(&self, pattern: &str) -> Range {
+        use bio::data_structures::fmindex::{BackwardSearchResult, FMIndexable};
+
+        #[cfg(feature = "fm-bench")]
+        let t0 = Instant::now();
+
+        let interval = self.fm.backward_search(pattern.as_bytes().iter());
+        let r = if let BackwardSearchResult::Complete(interval) = interval {
+            ((interval.lower - 1) as Pos, (interval.upper - 1) as Pos)
+        } else {
+            (0, 0)
+        };
+
+        #[cfg(feature = "fm-bench")]
+        {
+            let dt = t0.elapsed();
+            PERF_FM.fetch_add(dt.as_nanos() as u64, Ordering::Relaxed);
+        }
+        r
+    }
+
+    #[cfg(feature = "fm-bench")]
+    fn indices_range(&self, pattern: &str) -> Range {
+        let r = self.indices_range_sa(pattern);
+        let r2 = self.indices_range_fm(pattern);
+        if r != r2 {
+            warn!("SA and FM ranges differ for pattern '{pattern}': SA={r:?}, FM={r2:?}");
+        }
+        r
+    }
+
+    #[cfg(not(any(feature = "fm-bench", feature = "fm-index")))]
+    fn indices_range(&self, pattern: &str) -> Range {
+        self.indices_range_sa(pattern)
+    }
+
+    #[cfg(all(not(feature = "fm-bench"), feature = "fm-index"))]
+    fn indices_range(&self, pattern: &str) -> Range {
+        self.indices_range_fm(pattern)
     }
 
     #[cfg(feature = "sa-inverted")]
@@ -372,37 +521,17 @@ impl SA {
 
     #[inline]
     fn len(&self) -> usize {
-        self.data.len()
+        self.inner.data.len()
     }
 
     #[inline]
     fn size(&self) -> usize {
-        self.sa.len()
-    }
-
-    #[inline]
-    fn resolve(&self, idx: u32) -> (&str, Key) {
-        let idx = idx as usize;
-        let starts = &self.starts;
-        let full = self.sa.text();
-        (
-            if idx + 1 < self.len() {
-                &full[starts[idx] as usize..(starts[idx + 1] - 1) as usize]
-            } else {
-                &full[starts[idx] as usize..]
-            },
-            self.data[idx],
-        )
+        self.inner.full.len()
     }
 
     #[inline]
     fn into_inner(self) -> Stub {
-        let (full, _) = self.sa.into_parts();
-        Stub {
-            full: full.to_string(),
-            starts: self.starts,
-            data: self.data,
-        }
+        self.inner
     }
 
     fn single_select(&self, range: Range) -> impl Iterator<Item = Key> + '_ {
@@ -411,7 +540,7 @@ impl SA {
             .sorted_unstable()
             .dedup()
             .copied()
-            .map(move |idx| self.data[idx as usize])
+            .map(move |idx| self.inner.data[idx as usize])
     }
 
     fn heuristic_select<'a>(
@@ -427,7 +556,7 @@ impl SA {
             .dedup()
             .copied()
             .filter_map(move |idx| {
-                let (s, key) = self.resolve(idx);
+                let (s, key) = self.inner.resolve(idx);
                 let l = s.len();
                 if filters.iter().enumerate().all(|(p, tag)| {
                     p as Idx == min_idx || {
@@ -555,7 +684,7 @@ impl SA {
             res.difference_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
         }
         res.ones()
-            .map(|idx| self.data[idx])
+            .map(|idx| self.inner.data[idx])
             .collect_vec()
             .into_iter()
     }
@@ -564,7 +693,7 @@ impl SA {
         self.indices
             .join_blocks(range, self.len() as Idx)
             .ones()
-            .map(|idx| self.data[idx])
+            .map(|idx| self.inner.data[idx])
             .collect_vec()
             .into_iter()
     }
@@ -581,7 +710,7 @@ impl SA {
             set.union_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
         }
         set.zeroes()
-            .map(|idx| self.data[idx])
+            .map(|idx| self.inner.data[idx])
             .collect_vec()
             .into_iter()
     }
@@ -614,7 +743,7 @@ impl SA {
         patterns.iter().map(|patt| self.indices_range(patt))
     }
 
-    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
         if self.size() == 0 {
             return Box::new(std::iter::empty());
         }
@@ -733,6 +862,23 @@ impl SA {
 
         // Safety: we have ensured `filters.len() >= 1`.
         Box::new(unsafe { self.block_select(all.into_iter(), ban_filters) })
+    }
+
+    #[cfg(feature = "fm-bench")]
+    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        PERF_SA.store(0, Ordering::Relaxed);
+        PERF_FM.store(0, Ordering::Relaxed);
+        let r = self.do_select(query);
+
+        let d1 = Duration::from_nanos(PERF_SA.load(Ordering::Relaxed));
+        let d2 = Duration::from_nanos(PERF_FM.load(Ordering::Relaxed));
+        debug!("SA time: {d1:?}, FM time: {d2:?}");
+        r
+    }
+
+    #[cfg(not(feature = "fm-bench"))]
+    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        self.do_select(query)
     }
 }
 
