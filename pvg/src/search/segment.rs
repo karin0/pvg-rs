@@ -1,17 +1,20 @@
 use bio::data_structures::suffix_array::suffix_array;
-use fixedbitset::FixedBitSet;
-use integer_sqrt::IntegerSquareRoot;
 use itertools::Itertools;
-use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "fm-index")]
-use crate::fm_index::FMIndex;
+#[cfg(feature = "sa-bench")]
+use std::sync::atomic::AtomicU32;
 
 #[cfg(feature = "fm-bench")]
 use std::sync::atomic::AtomicU64;
+
+use super::indices::{Indices, Range, RangeExt};
+use super::types::{Idx, Item, Key, Pos, STATS};
+
+#[cfg(feature = "fm-index")]
+use super::fm_index::FMIndex;
 
 // https://github.com/BurntSushi/suffix/blob/5ba4f72941872b697ff3c216f8315ff6de4bf5d7/src/table.rs
 #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
@@ -31,174 +34,6 @@ where
     left
 }
 
-type Key = pixiv::IllustId;
-type Pos = u32;
-type Idx = u32;
-type Item<'a> = (Key, &'a str);
-
-type Range = (Pos, Pos);
-
-trait RangeExt {
-    fn len(&self) -> usize;
-}
-
-impl RangeExt for Range {
-    #[inline]
-    fn len(&self) -> usize {
-        (self.1 - self.0) as usize
-    }
-}
-
-struct Indices {
-    inner: Vec<Idx>, // len = N, total length of all strings (in bytes)
-    #[cfg(feature = "sa-inverted")]
-    occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
-    blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
-    block_size: Pos,
-}
-
-impl Indices {
-    fn memory(&self, v: usize) -> (usize, usize) {
-        let n = self.inner.len();
-        let blocks = self.blocks.len() * v / size_of::<fixedbitset::Block>();
-        let r = n * size_of::<Idx>() + blocks + size_of::<Self>();
-
-        #[cfg(feature = "sa-inverted")]
-        let r = r + n;
-
-        (r, blocks)
-    }
-
-    fn new<S: AsRef<str>, I: Iterator<Item = S>>(iter: I, v: Idx, sa: &[usize]) -> Indices {
-        let raw_indices = iter
-            .enumerate()
-            .flat_map(|(idx, s)| {
-                std::iter::repeat_n(idx as Pos, s.as_ref().len() + usize::from(idx != 0))
-            })
-            .collect_vec();
-
-        let mut indices = sa.iter().map(|&p| raw_indices[p]).collect_vec();
-        drop(raw_indices);
-        indices.shrink_to_fit();
-
-        #[cfg(feature = "sa-inverted")]
-        let occurrences = {
-            let mut occurrences: Vec<Vec<Pos>> = vec![Vec::new(); v as usize];
-            for (i, &idx) in indices.iter().enumerate() {
-                occurrences[idx as usize].push(i as Pos);
-            }
-            for occ in &mut occurrences {
-                occ.shrink_to_fit();
-            }
-            occurrences.shrink_to_fit();
-            occurrences
-        };
-
-        let n = indices.len() as Pos;
-        let (mut blocks, block_size) = if n > 0 {
-            let block_size = n.integer_sqrt().clamp(1, 10000);
-            let blocks = indices
-                .chunks(block_size as usize)
-                .map(|chunk| {
-                    let mut set = FixedBitSet::with_capacity(v as usize);
-                    for &idx in chunk {
-                        set.insert(idx as usize);
-                    }
-                    set
-                })
-                .collect_vec();
-
-            (blocks, block_size)
-        } else {
-            (Vec::new(), 0)
-        };
-        blocks.shrink_to_fit();
-
-        Indices {
-            inner: indices,
-            #[cfg(feature = "sa-inverted")]
-            occurrences,
-            blocks,
-            block_size,
-        }
-    }
-
-    #[inline]
-    fn join_blocks(&self, range: Range, v: Idx) -> FixedBitSet {
-        let (l, r) = range;
-        let b = self.block_size;
-        let start = l.div_ceil(b);
-        let end = r / b;
-
-        let bound = r.min(start * b);
-        if r <= bound {
-            // Same block, r == bound.
-            let mut res = FixedBitSet::with_capacity(v as usize);
-            for &idx in &self.inner[l as usize..r as usize] {
-                // Safety: `res.len()` == `v`, and all indices are < `v`.
-                unsafe {
-                    res.insert_unchecked(idx as usize);
-                }
-            }
-            return res;
-        }
-
-        let mut res;
-        if start < end {
-            let blocks = end - start;
-            STATS.fetch_add(blocks, Ordering::Relaxed);
-            debug!("joining {blocks} blocks");
-
-            // Safety: `start < end` ensures at least one block exists.
-            let (first, rest) = unsafe {
-                self.blocks[start as usize..end as usize]
-                    .split_first()
-                    .unwrap_unchecked()
-            };
-
-            res = first.clone();
-            for b in rest {
-                res.union_with(b);
-            }
-        } else {
-            res = FixedBitSet::with_capacity(v as usize);
-        }
-
-        for &idx in &self.inner[l as usize..bound as usize] {
-            unsafe {
-                res.insert_unchecked(idx as usize);
-            }
-        }
-
-        let bound = l.max(end * b);
-        for &idx in &self.inner[bound as usize..r as usize] {
-            unsafe {
-                res.insert_unchecked(idx as usize);
-            }
-        }
-
-        res
-    }
-
-    #[cfg(feature = "sa-inverted")]
-    fn occured_in_range(&self, idx: Idx, range: Range) -> bool {
-        let occurences = &self.occurrences[idx as usize];
-        if let Err(bound) = occurences.binary_search(&range.0) {
-            occurences.get(bound).is_some_and(|&p| p < range.1)
-        } else {
-            true
-        }
-    }
-}
-
-impl std::ops::Index<Range> for Indices {
-    type Output = [Idx];
-
-    fn index(&self, range: Range) -> &Self::Output {
-        &self.inner[range.0 as usize..range.1 as usize]
-    }
-}
-
 fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a str> + 'a {
     starts
         .iter()
@@ -212,7 +47,7 @@ fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a 
         })
 }
 
-struct Stub {
+pub struct Stub {
     full: String,     // len = N
     starts: Vec<Pos>, // len = V, number of strings
     data: Vec<Key>,   // len = V
@@ -227,7 +62,7 @@ impl Stub {
     }
 
     #[inline]
-    fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Item<'_>> + '_ {
         let strs = iter_parts(&self.full, &self.starts);
         self.data.iter().copied().zip(strs)
     }
@@ -248,10 +83,8 @@ impl Stub {
     }
 }
 
-static STATS: AtomicU32 = AtomicU32::new(0);
-
 #[cfg(feature = "sa-bench")]
-static FLAGS: AtomicU32 = AtomicU32::new(0);
+pub static FLAGS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(feature = "fm-bench")]
 static PERF_SA: AtomicU64 = AtomicU64::new(0);
@@ -259,7 +92,7 @@ static PERF_SA: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "fm-bench")]
 static PERF_FM: AtomicU64 = AtomicU64::new(0);
 
-struct SA {
+pub struct Segment {
     #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
     sa: Vec<Pos>, // len = N
     #[cfg(feature = "fm-index")]
@@ -268,8 +101,8 @@ struct SA {
     indices: Indices,
 }
 
-impl SA {
-    fn memory(&self) -> usize {
+impl Segment {
+    pub fn memory(&self) -> usize {
         let mut r = self.inner.memory() + self.indices.memory(self.len()).0 + size_of::<Self>();
 
         #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
@@ -357,7 +190,7 @@ impl SA {
         stub.full.shrink_to_fit();
 
         let dt = t0.elapsed();
-        let r = SA {
+        let r = Segment {
             #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
             sa,
             #[cfg(feature = "fm-index")]
@@ -380,7 +213,7 @@ impl SA {
             + 1
     }
 
-    fn from_iter<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(iter: I) -> Self {
+    pub fn from_iter<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(iter: I) -> Self {
         let t0 = Instant::now();
         let items = iter.collect_vec();
         let mut full = String::with_capacity(Self::get_size_hint(&items).saturating_sub(1));
@@ -402,10 +235,10 @@ impl SA {
             })
             .unzip();
 
-        SA::from_inner(Stub { full, starts, data }, t0)
+        Segment::from_inner(Stub { full, starts, data }, t0)
     }
 
-    fn extend<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(self, iter: I) -> Self {
+    pub fn extend<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(self, iter: I) -> Self {
         if self.len() == 0 {
             return Self::from_iter(iter);
         }
@@ -427,7 +260,7 @@ impl SA {
             inner.data.push(k);
         }
 
-        SA::from_inner(inner, t0)
+        Segment::from_inner(inner, t0)
     }
 
     #[cfg(any(feature = "fm-bench", not(feature = "fm-index")))]
@@ -513,24 +346,24 @@ impl SA {
         self.indices_range_fm(pattern)
     }
 
-    #[cfg(feature = "sa-inverted")]
+    #[cfg(feature = "sa-bench")]
     #[inline]
     fn indices(&self, pattern: &str) -> &[Idx] {
         &self.indices[self.indices_range(pattern)]
     }
 
     #[inline]
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.inner.data.len()
     }
 
     #[inline]
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.inner.full.len()
     }
 
     #[inline]
-    fn into_inner(self) -> Stub {
+    pub fn into_inner(self) -> Stub {
         self.inner
     }
 
@@ -598,7 +431,7 @@ impl SA {
                         .iter()
                         .any(|&range| indices.occured_in_range(idx, range))
                 {
-                    Some(self.data[idx as usize])
+                    Some(self.inner.data[idx as usize])
                 } else {
                     None
                 }
@@ -645,7 +478,7 @@ impl SA {
         Box::new(
             s.into_iter()
                 .sorted_unstable()
-                .map(move |idx| self.data[idx as usize]),
+                .map(move |idx| self.inner.data[idx as usize]),
         )
     }
 
@@ -659,13 +492,17 @@ impl SA {
             .flat_map(|patt| self.indices(patt))
             .collect::<HashSet<_>>();
         STATS.fetch_add(ban_idxs.len() as u32, Ordering::Relaxed);
-        self.data.iter().enumerate().filter_map(move |(idx, &key)| {
-            if ban_idxs.contains(&(idx as Pos)) {
-                None
-            } else {
-                Some(key)
-            }
-        })
+        self.inner
+            .data
+            .iter()
+            .enumerate()
+            .filter_map(move |(idx, &key)| {
+                if ban_idxs.contains(&(idx as Pos)) {
+                    None
+                } else {
+                    Some(key)
+                }
+            })
     }
 
     /// Safety: `ranges` must yield at least one item.
@@ -736,7 +573,7 @@ impl SA {
             STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.difference(&t).copied().collect();
         }
-        s.into_iter().map(|idx| self.data[idx as usize])
+        s.into_iter().map(|idx| self.inner.data[idx as usize])
     }
 
     fn query_ranges(&self, patterns: &[String]) -> impl Iterator<Item = Range> {
@@ -865,7 +702,7 @@ impl SA {
     }
 
     #[cfg(feature = "fm-bench")]
-    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
         PERF_SA.store(0, Ordering::Relaxed);
         PERF_FM.store(0, Ordering::Relaxed);
         let r = self.do_select(query);
@@ -877,12 +714,12 @@ impl SA {
     }
 
     #[cfg(not(feature = "fm-bench"))]
-    fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
         self.do_select(query)
     }
 }
 
-impl Default for SA {
+impl Default for Segment {
     fn default() -> Self {
         Self::from_iter::<&str, _>(std::iter::empty())
     }
@@ -900,147 +737,6 @@ impl<'a> Query<'a> {
         Query {
             filters,
             ban_filters,
-        }
-    }
-}
-
-#[derive(Default)]
-struct Dedup(HashMap<Key, Pos>);
-
-impl Dedup {
-    fn push<'a>(&mut self, out: &mut Vec<Item<'a>>, item: Item<'a>) {
-        use std::collections::hash_map::Entry;
-        let key = item.0;
-        match self.0.entry(key) {
-            Entry::Occupied(ent) => {
-                let idx = *ent.get() as usize;
-                out[idx] = item;
-            }
-            Entry::Vacant(ent) => {
-                ent.insert(out.len() as Pos);
-                out.push(item);
-            }
-        }
-    }
-
-    fn extend<'a, I: IntoIterator<Item = Item<'a>>>(&mut self, out: &mut Vec<Item<'a>>, iter: I) {
-        for (k, s) in iter {
-            self.push(out, (k, s));
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct Index {
-    major: SA,
-    minor: Option<SA>,
-    dedup: bool,
-}
-
-impl Index {
-    pub fn new<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(data: I) -> Self {
-        Self {
-            major: SA::from_iter(data),
-            minor: None,
-            dedup: false,
-        }
-    }
-
-    #[cfg(feature = "sa-bench")]
-    pub fn set_flags(flags: u32) {
-        FLAGS.store(flags, Ordering::Relaxed);
-    }
-
-    pub fn stats() -> u32 {
-        STATS.swap(0, Ordering::Relaxed)
-    }
-
-    pub fn size(&self) -> usize {
-        let mut sz = self.major.size();
-        if let Some(minor) = &self.minor {
-            sz += minor.size();
-        }
-        sz
-    }
-
-    pub fn memory(&self) -> usize {
-        let mut sz = self.major.memory();
-        if let Some(minor) = &self.minor {
-            sz += minor.memory();
-        }
-        sz
-    }
-
-    fn do_select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
-        if self.dedup {
-            let mut seen = HashSet::new();
-            iter.filter(|k| seen.insert(*k)).collect_vec()
-        } else {
-            iter.collect_vec()
-        }
-    }
-
-    pub fn select(&self, query: Query) -> Vec<Key> {
-        if let Some(minor) = &self.minor {
-            self.do_select(self.major.select(query).chain(minor.select(query)))
-        } else {
-            self.do_select(self.major.select(query))
-        }
-    }
-
-    // `dup` should be set if provided `data` may contain duplicates of existing items.
-    pub fn insert(&mut self, data: Vec<(Key, String)>, dup: bool) {
-        // The entire minor SA is "infected" if `dup` is set.
-        self.dedup |= dup;
-        if let Some(minor) = self.minor.take() {
-            let len = data.len();
-            let data = data.iter().map(|(k, s)| (*k, s.as_str()));
-            let minor_len = minor.len();
-            if (minor_len + data.len()) * 16 > self.major.len() {
-                warn!(
-                    "Compacting SA indices: major={}, minor={minor_len}, new={}",
-                    self.major.len(),
-                    data.len()
-                );
-
-                // Drop the old indices before reconstruction.
-                let minor = minor.into_inner();
-                self.minor = None;
-
-                self.major = if self.dedup {
-                    let major = std::mem::take(&mut self.major).into_inner();
-                    let mut combined = major.iter().collect_vec();
-                    combined.reserve(minor_len + len);
-
-                    let mut dedup = Dedup::default();
-                    dedup.extend(&mut combined, minor.iter());
-                    if dup {
-                        dedup.extend(&mut combined, data);
-                    } else {
-                        combined.extend(data);
-                    }
-
-                    self.dedup = false;
-                    SA::from_iter(combined.into_iter())
-                } else {
-                    std::mem::take(&mut self.major).extend(minor.iter().chain(data))
-                }
-            } else {
-                self.minor = Some(if dup {
-                    let minor = minor.into_inner();
-                    let mut combined = minor.iter().collect_vec();
-                    combined.reserve(len);
-
-                    let mut dedup = Dedup::default();
-                    dedup.extend(&mut combined, data);
-
-                    SA::from_iter(combined.into_iter())
-                } else {
-                    minor.extend(data)
-                });
-            }
-        } else {
-            self.minor = Some(SA::from_iter(data.into_iter()));
         }
     }
 }

@@ -48,7 +48,7 @@ pixiv = { path = "../pixiv" }
 vergen-gitcl = { version = "1", features = ["build"] }
 
 [features]
-default = ["sam"]
+default = ["sam", "fm-index"]
 io-uring = ["actix-files/experimental-io-uring"]
 image = ["dep:image", "dep:rayon"]
 rename2 = ["dep:nix"]

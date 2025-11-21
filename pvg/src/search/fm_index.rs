@@ -1,12 +1,11 @@
+use super::types::Pos;
 use bio::alphabets::Alphabet;
 use bio::data_structures::bwt::{BWT, less};
 use bio::data_structures::fmindex::FMIndexable;
 use itertools::Itertools;
 use std::mem::size_of;
 
-const OCC_K: u32 = 1024;
-
-type Pos = u32;
+const OCC_K: Pos = 512;
 
 pub struct Occ {
     occ: Vec<Vec<Pos>>,
