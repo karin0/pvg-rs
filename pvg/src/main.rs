@@ -14,6 +14,9 @@ mod util;
 #[cfg(feature = "sam")]
 mod sa;
 
+#[cfg(feature = "fm-index")]
+mod fm_index;
+
 use crate::core::Pvg;
 use crate::util::normalized;
 use actix_cors::Cors;
