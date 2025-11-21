@@ -5,6 +5,7 @@ use crate::model::{Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
@@ -13,11 +14,12 @@ use pixiv::aapi::Restrict;
 use pixiv::client::{AuthedClient, AuthedState};
 use pixiv::download::DownloadClient;
 use pixiv::{IllustId, PageNum};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use std::collections::HashSet;
-use std::io;
-use std::io::Read;
+use std::fs::File;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, RwLockWriteGuard, Semaphore, mpsc};
@@ -72,12 +74,41 @@ pub struct BookmarkPage {
 
 static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
 
+fn lock_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let lock;
+    let r = match File::open(path) {
+        Ok(file) => {
+            file.try_lock_exclusive()?;
+            let reader = std::io::BufReader::new(file);
+            let r = Some(serde_json::from_reader::<_, T>(reader)?);
+            lock = File::open(path)?;
+            r
+        }
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                info!("{}: not exist, creating", path.display());
+                let file = File::create(path)?;
+                lock = file;
+                None
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
+    lock.try_lock_exclusive()?;
+    std::mem::forget(lock); // keep the lock held until process exit
+    Ok(r)
+}
+
 impl Pvg {
     pub async fn new() -> Result<Pvg> {
         let t = Instant::now();
         let mut config = read_config()?;
         let refresh_token = std::mem::replace(&mut config.refresh_token, "*".to_owned());
         info!("config: {config:?}");
+
+        let cache = lock_file::<LoadedCache>(&config.cache_file)?;
+
         if let Some(proxy) = &config.proxy {
             unsafe {
                 std::env::set_var("HTTP_PROXY", proxy);
@@ -100,40 +131,28 @@ impl Pvg {
 
         let not_found;
         let worker_to_download;
-        let api = match std::fs::File::open(&config.cache_file) {
-            Ok(mut cache) => {
-                let mut s = String::new();
-                cache.read_to_string(&mut s)?;
-                info!("read {} bytes from {:?}", s.len(), cache);
-                let cache: LoadedCache = serde_json::from_str(&s)?;
-                if let Some(dims) = cache.dims {
-                    nav.load_dims_cache(dims)?;
-                } else {
-                    info!("no cached dims");
-                }
-                not_found = cache.not_found;
-                worker_to_download = cache.worker_to_download;
-                if let Some(token) = cache.token {
-                    info!(
-                        "loaded token: {} {} {}",
-                        token.user.id, token.user.name, token.user.account
-                    );
-                    AuthedClient::load(token)
-                } else {
-                    info!("no cached token");
-                    AuthedClient::new(&refresh_token).await?
-                }
+        let api = if let Some(cache) = cache {
+            if let Some(dims) = cache.dims {
+                nav.load_dims_cache(dims)?;
+            } else {
+                info!("no cached dims");
             }
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    info!("no cache file");
-                    not_found = HashSet::new();
-                    worker_to_download = Vec::new();
-                    AuthedClient::new(&refresh_token).await?
-                } else {
-                    return Err(e.into());
-                }
+            not_found = cache.not_found;
+            worker_to_download = cache.worker_to_download;
+            if let Some(token) = cache.token {
+                info!(
+                    "loaded token: {} {} {}",
+                    token.user.id, token.user.name, token.user.account
+                );
+                AuthedClient::load(token)
+            } else {
+                info!("no cached token");
+                AuthedClient::new(&refresh_token).await?
             }
+        } else {
+            not_found = HashSet::new();
+            worker_to_download = Vec::new();
+            AuthedClient::new(&refresh_token).await?
         };
 
         info!("api: {} {}", api.state.user.name, api.state.user.id);
@@ -842,21 +861,18 @@ impl Pvg {
         let r = Self::_select(&index, r);
 
         let now2 = Instant::now();
-        let t = (now2 - now).as_millis();
+        let dt = now2 - now;
         let n = r.len();
         let r = serde_json::to_string(&SelectResponse { items: r })?;
+        let dt2 = now2.elapsed();
         info!(
-            "{:?} - {:?}: {} illusts ({:.1} KiB) in {} + {} ms",
-            filters,
+            "{filters:?} - {:?}: {n} illusts ({:.1} KiB) in {dt:?} + {dt2:?}",
             if let Some(bans) = ban_filters.as_deref() {
                 bans
             } else {
                 &[]
             },
-            n,
-            r.len() as f32 / 1024.,
-            t,
-            now2.elapsed().as_millis()
+            r.len() as f32 / 1024.
         );
         Ok(r)
     }
