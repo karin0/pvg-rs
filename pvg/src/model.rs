@@ -12,7 +12,7 @@ use std::mem::size_of;
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(feature = "sam")]
+#[cfg(feature = "search")]
 use crate::search::{Index as SearchIndex, Query};
 
 pub use crate::illust::Dimension;
@@ -85,11 +85,11 @@ impl Illust {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StagedStatus {
     New,
-    #[cfg(feature = "sam")]
+    #[cfg(feature = "search")]
     IntroChanged,
-    #[cfg(feature = "sam")]
+    #[cfg(feature = "search")]
     IntroUnchanged,
-    #[cfg(not(feature = "sam"))]
+    #[cfg(not(feature = "search"))]
     Updated,
 }
 
@@ -124,7 +124,7 @@ pub struct IllustIndex {
     pub srv: IllustService,
     ids: Vec<IllustId>, // TODO: store pointers to speed up?
     stages: [IllustStage; 2],
-    #[cfg(feature = "sam")]
+    #[cfg(feature = "search")]
     sa: SearchIndex,
     disable_select: bool,
 }
@@ -138,11 +138,11 @@ impl IllustIndex {
         let srv = self.srv.memory();
         let srv_lens = self.srv.lens();
         let sa = {
-            #[cfg(feature = "sam")]
+            #[cfg(feature = "search")]
             {
                 self.sa.memory()
             }
-            #[cfg(not(feature = "sam"))]
+            #[cfg(not(feature = "search"))]
             {
                 0
             }
@@ -173,7 +173,7 @@ impl Page {
     }
 }
 
-#[cfg(feature = "sam")]
+#[cfg(feature = "search")]
 fn make_intro(data: &IllustData, srv: &IllustService) -> String {
     let mut s = format!("{}\\{}", data.title, srv.get_user_name(data));
     for t in srv.get_tags(data) {
@@ -248,7 +248,7 @@ impl Illust {
         })
     }
 
-    #[cfg(feature = "sam")]
+    #[cfg(feature = "search")]
     fn intro(&self, srv: &IllustService) -> String {
         make_intro(&self.data, srv)
     }
@@ -306,14 +306,14 @@ impl IllustIndex {
             Duration::from_nanos(stats.1 as u64)
         );
 
-        #[cfg(feature = "sam")]
+        #[cfg(feature = "search")]
         let sa = if disable_select {
             SearchIndex::default()
         } else {
             SearchIndex::new(ids.iter().map(|id| (*id, map[id].intro(&srv))))
         };
 
-        #[cfg(feature = "sam")]
+        #[cfg(feature = "search")]
         {
             let n = sa.size();
             let mem = sa.memory();
@@ -327,7 +327,7 @@ impl IllustIndex {
             ids,
             srv,
             stages: [IllustStage::default(), IllustStage::default()],
-            #[cfg(feature = "sam")]
+            #[cfg(feature = "search")]
             sa,
             disable_select,
         })
@@ -488,7 +488,7 @@ impl IllustIndex {
                             debug!("new: {:?}", illust.data);
                         }
                     }
-                    #[cfg(feature = "sam")]
+                    #[cfg(feature = "search")]
                     {
                         let old_intro = old.intro(&self.srv);
                         let intro = illust.intro(&self.srv);
@@ -501,7 +501,7 @@ impl IllustIndex {
                             StagedStatus::IntroChanged
                         };
                     }
-                    #[cfg(not(feature = "sam"))]
+                    #[cfg(not(feature = "search"))]
                     {
                         status = StagedStatus::Updated;
                     }
@@ -570,10 +570,10 @@ impl IllustIndex {
             return 0;
         }
 
-        #[cfg(feature = "sam")]
+        #[cfg(feature = "search")]
         let mut sa_needs_dedup = false;
 
-        #[cfg(feature = "sam")]
+        #[cfg(feature = "search")]
         let intro_changed_ids = if self.disable_select {
             Vec::new()
         } else {
@@ -624,7 +624,7 @@ impl IllustIndex {
             self.do_rollback(new_ids.into_iter(), stage_id, cnt);
 
             // Clear the index to alert.
-            #[cfg(feature = "sam")]
+            #[cfg(feature = "search")]
             if !self.disable_select {
                 self.sa = SearchIndex::default();
             }
@@ -636,7 +636,7 @@ impl IllustIndex {
         self.ids.extend(new_ids);
 
         if !self.disable_select {
-            #[cfg(feature = "sam")]
+            #[cfg(feature = "search")]
             {
                 // XXX: This handles updated illusts with intro changed as well,
                 // but the order is not perfectly preserved.
@@ -684,7 +684,7 @@ impl IllustIndex {
         delta
     }
 
-    #[cfg(feature = "sam")]
+    #[cfg(feature = "search")]
     fn do_select(&self, kind: u32, query: Query) -> Vec<IllustId> {
         let t0 = std::time::Instant::now();
         let res = self.sa.select(query);
@@ -703,14 +703,14 @@ impl IllustIndex {
         filters: &[String],
         ban_filters: &[String],
     ) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
-        #[cfg(not(feature = "sam"))]
+        #[cfg(not(feature = "search"))]
         {
             error!("not built with sam feature, select is disabled");
             let _ = (filters, ban_filters);
             Box::new(self.iter())
         }
 
-        #[cfg(feature = "sam")]
+        #[cfg(feature = "search")]
         {
             // `Query` requires at least one filter.
             if filters.is_empty() && ban_filters.is_empty() {

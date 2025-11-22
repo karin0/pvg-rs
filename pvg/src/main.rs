@@ -11,7 +11,7 @@ mod store;
 mod upscale;
 mod util;
 
-#[cfg(feature = "sam")]
+#[cfg(feature = "search")]
 mod search;
 
 use crate::core::Pvg;

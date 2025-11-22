@@ -24,26 +24,26 @@ parking_lot = "0.12"
 actix-cors = "0.7"
 ctrlc = { version = "3", features = ["termination"] }
 futures = "0"
-rayon = { version = "1", optional = true }
-image = { version = "0", optional = true }
 itertools = "0.14"
 lru = "0.16"
-nix = { version = "0.30", features = ["fs"], optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros"] }
 unicode-normalization = "0.1"
 lz4 = "1"
 string-interner = "0.19"
 fs2 = "0.4"
-fixedbitset = "0.5"
-integer-sqrt = "0.1"
+
+image = { version = "0", optional = true }
+rayon = { version = "1", optional = true }
 similar = { version = "2", optional = true }
+fixedbitset = { version = "0.5", optional = true }
+integer-sqrt = { version = "0.1", optional = true }
 bio = { version = "3", optional = true }
 bytecount = { version = "0.6", optional = true }
 packedvec = { version = "1", optional = true }
-
+nix = { version = "0.30", features = ["fs"], optional = true }
 dhat = { version = "0.3", optional = true }
-pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 
+pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 pixiv = { path = "../pixiv" }
 
 [build-dependencies]
@@ -51,17 +51,18 @@ vergen = { version = "9", features = ["build", "cargo", "rustc", "si"] }
 vergen-gitcl = { version = "1", features = ["build"] }
 
 [features]
-default = ["sam", "sa-packed", "fm-index"]
-io-uring = ["actix-files/experimental-io-uring"]
-image = ["dep:image", "dep:rayon"]
-rename2 = ["dep:nix"]
-dhat-heap = ["dep:dhat"]
-sam = ["dep:bio"]
-diff = ["dep:similar"]
-sa-packed = ["dep:packedvec"]
-fm-index = ["dep:bytecount"]
-sa-inverted = []
+default = ["sa-packed", "fm-index"]
 
-sa-bench = []
-sa-packed-bench = []
-fm-bench = []
+rename2 = ["dep:nix"]
+io-uring = ["actix-files/experimental-io-uring"]
+diff = ["dep:similar"]
+search = ["dep:bio", "dep:fixedbitset", "dep:integer-sqrt"]
+sa-packed = ["search", "dep:packedvec"]
+fm-index = ["search", "dep:bytecount"]
+sa-inverted = ["search"]
+
+image = ["dep:image", "dep:rayon"]
+dhat-heap = ["dep:dhat"]
+sa-bench = ["sa-inverted"]
+sa-packed-bench = ["sa-packed"]
+fm-bench = ["fm-index"]
