@@ -47,13 +47,13 @@ fn iter_parts<'a>(full: &'a str, starts: &'a [Pos]) -> impl Iterator<Item = &'a 
         })
 }
 
-pub struct Stub {
+pub struct Inner {
     full: String,     // len = N
     starts: Vec<Pos>, // len = V, number of strings
     data: Vec<Key>,   // len = V
 }
 
-impl Stub {
+impl Inner {
     fn memory(&self) -> usize {
         self.full.len() * size_of::<u8>()
             + self.starts.len() * size_of::<Pos>()
@@ -146,7 +146,7 @@ impl Segment {
         );
     }
 
-    fn from_inner(mut stub: Stub, t0: Instant) -> Self {
+    fn from_inner(mut stub: Inner, t0: Instant) -> Self {
         stub.data.shrink_to_fit();
         stub.starts.shrink_to_fit();
 
@@ -208,15 +208,16 @@ impl Segment {
     fn get_size_hint<S: AsRef<str>>(items: &[(Key, S)]) -> usize {
         items
             .iter()
-            .map(|(_, s)| s.as_ref().len() + 1)
+            .map(|(_, s)| s.as_ref().len() + 1) // separator
             .sum::<usize>()
-            + 1
+        // The first separator is not needed, but that accounts for the trailing null byte
+        // required by bio.
     }
 
     pub fn from_iter<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(iter: I) -> Self {
         let t0 = Instant::now();
         let items = iter.collect_vec();
-        let mut full = String::with_capacity(Self::get_size_hint(&items).saturating_sub(1));
+        let mut full = String::with_capacity(Self::get_size_hint(&items));
 
         let mut first = true;
         let (data, starts): (Vec<Key>, Vec<Pos>) = items
@@ -235,7 +236,7 @@ impl Segment {
             })
             .unzip();
 
-        Segment::from_inner(Stub { full, starts, data }, t0)
+        Segment::from_inner(Inner { full, starts, data }, t0)
     }
 
     pub fn extend<S: AsRef<str>, I: Iterator<Item = (Key, S)>>(self, iter: I) -> Self {
@@ -247,7 +248,7 @@ impl Segment {
         let v = items.len();
 
         let mut inner = self.into_inner();
-        inner.full.reserve(Self::get_size_hint(&items));
+        inner.full.reserve(Self::get_size_hint(&items) + 1); // starting separator
         inner.starts.reserve(v);
         inner.data.reserve(v);
 
@@ -361,7 +362,7 @@ impl Segment {
     }
 
     #[inline]
-    pub fn into_inner(self) -> Stub {
+    pub fn into_inner(self) -> Inner {
         self.inner
     }
 
