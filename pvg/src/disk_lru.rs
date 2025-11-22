@@ -18,10 +18,23 @@ impl DiskLru {
     ) -> Result<(Self, Option<u64>)> {
         let mut entires = Vec::with_capacity(size_hint);
         let mut it = fs::read_dir(dir).await?;
+        let mut err = false;
         while let Some(file) = it.next_entry().await? {
             let meta = file.metadata().await?;
-            let file = file.file_name().into_string().unwrap();
+            if !meta.is_file() {
+                error!("not a file: {}", file.path().display());
+                err = true;
+                continue;
+            }
+
             let size = meta.len();
+            if size == 0 {
+                error!("empty file: {}", file.path().display());
+                err = true;
+                continue;
+            }
+
+            let file = file.file_name().into_string().unwrap();
             let time = if cache_limit.is_some() {
                 meta.accessed()
                     .or_else(|_| meta.modified())
@@ -31,6 +44,10 @@ impl DiskLru {
                 SystemTime::UNIX_EPOCH
             };
             entires.push((file, size, time));
+        }
+
+        if err {
+            error!("Please move away the invalid files, or downloading might fail.");
         }
 
         let total_size: u64 = entires.iter().map(|(_, size, _)| *size).sum();
