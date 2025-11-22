@@ -97,7 +97,7 @@ pub struct Segment {
     sa: Vec<Pos>, // len = N
     #[cfg(feature = "fm-index")]
     fm: FMIndex,
-    inner: Stub,
+    inner: Inner,
     indices: Indices,
 }
 
@@ -572,67 +572,13 @@ impl Segment {
         s.into_iter().map(|idx| self.inner.data[idx as usize])
     }
 
+    #[inline]
     fn query_ranges(&self, patterns: &[String]) -> impl Iterator<Item = Range> {
         patterns.iter().map(|patt| self.indices_range(patt))
     }
 
-    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
-        if self.size() == 0 {
-            return Box::new(std::iter::empty());
-        }
-
-        let filters = query.filters;
-        let ban_filters = query.ban_filters;
-
-        #[cfg(feature = "sa-bench")]
-        let flags = FLAGS.load(Ordering::Relaxed) & 0xf;
-
-        #[cfg(feature = "sa-bench")]
-        if flags == 0x9 {
-            debug!("forced brute select");
-            return Box::new(
-                self.brute_select(self.query_ranges(filters), self.query_ranges(ban_filters)),
-            );
-        }
-
-        match filters.len() {
-            0 => {
-                #[cfg(feature = "sa-bench")]
-                if flags == 0x5 {
-                    debug!("forced inverted_ban_select");
-                    return Box::new(self.inverted_ban_select(ban_filters));
-                }
-                // Safety: `Query::new` ensures at least one filter exists.
-                // Since `filters.len() == 0`, `ban_filters` must be non-empty.
-                return Box::new(unsafe { self.block_ban_select(ban_filters) });
-            }
-            1 => {
-                #[cfg(feature = "sa-bench")]
-                let cond = flags == 0;
-                #[cfg(not(feature = "sa-bench"))]
-                let cond = true;
-                if cond && ban_filters.is_empty() {
-                    let range = self.indices_range(&filters[0]);
-                    if range.len() >= 3000 {
-                        return Box::new(self.single_block_select(range));
-                    }
-                    return Box::new(self.single_select(range));
-                }
-            }
-            _ => {}
-        }
-
-        let all = self.query_ranges(filters);
-
-        #[cfg(feature = "sa-bench")]
-        if flags == 0x7 {
-            debug!("forced block_select");
-            // Safety: we have ensured `filters.len() >= 1`.
-            return Box::new(unsafe { self.block_select(all, ban_filters) });
-        }
-
-        let all = all.collect_vec();
-
+    #[inline]
+    fn find_min_range(&self, all: &[Range]) -> Option<(Idx, Pos, impl Iterator<Item = Idx> + '_)> {
         // Safety: we have ensured `filters.len() >= 1`.
         let (min_idx, &min) = unsafe {
             all.iter()
@@ -641,11 +587,10 @@ impl Segment {
                 .unwrap_unchecked()
         };
 
-        let min_idx = min_idx as Idx;
         let min_len = min.len();
 
         if min_len == 0 {
-            return Box::new(std::iter::empty());
+            return None;
         }
 
         if log_enabled!(log::Level::Debug) {
@@ -657,23 +602,97 @@ impl Segment {
 
         let min_indices = self.indices.slice(min);
 
-        #[cfg(feature = "sa-bench")]
+        Some((min_idx as Idx, min_len as Pos, min_indices))
+    }
+
+    #[cfg(feature = "sa-bench")]
+    #[inline]
+    fn bench_select<'a>(
+        &'a self,
+        query: Query<'a>,
+        flags: u32,
+    ) -> Box<dyn Iterator<Item = Key> + 'a> {
+        let filters = query.filters;
+        let ban_filters = query.ban_filters;
+
+        if flags == 0x9 {
+            debug!("forced brute select");
+            return Box::new(
+                self.brute_select(self.query_ranges(filters), self.query_ranges(ban_filters)),
+            );
+        }
+
+        if filters.is_empty() {
+            if flags == 0x5 {
+                debug!("forced inverted_ban_select");
+                return Box::new(self.inverted_ban_select(ban_filters));
+            }
+            // Safety: `Query::new` ensures at least one filter exists.
+            // Since `filters.len() == 0`, `ban_filters` must be non-empty.
+            return Box::new(unsafe { self.block_ban_select(ban_filters) });
+        }
+
+        let all = self.query_ranges(filters);
+
+        if flags == 0x7 {
+            debug!("forced block_select");
+            // Safety: we have ensured `filters.len() >= 1`.
+            return Box::new(unsafe { self.block_select(all, ban_filters) });
+        }
+
+        let all = all.collect_vec();
+        let Some((min_idx, _, min_indices)) = self.find_min_range(&all) else {
+            return Box::new(std::iter::empty());
+        };
+
         if flags == 0x1 {
             debug!("forced heuristic_select");
             return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
         }
 
-        #[cfg(feature = "sa-bench")]
         if flags == 0x5 {
             debug!("forced inverted_select");
             return self.inverted_select(all, min_idx, min_indices, ban_filters);
         }
 
-        #[cfg(all(feature = "sa-bench", feature = "sa-inverted"))]
+        #[cfg(feature = "sa-inverted")]
         if flags == 0x3 {
             debug!("forced binary_select");
             return Box::new(self.binary_select(all, min_idx, min_indices, ban_filters));
         }
+
+        error!("unrecognized sa-bench flags: {flags}");
+        Box::new(std::iter::empty())
+    }
+
+    #[inline]
+    fn plan_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        let filters = query.filters;
+        let ban_filters = query.ban_filters;
+
+        match filters.len() {
+            0 => {
+                // Safety: `Query::new` ensures at least one filter exists.
+                // Since `filters.len() == 0`, `ban_filters` must be non-empty.
+                return Box::new(unsafe { self.block_ban_select(ban_filters) });
+            }
+            1 => {
+                if ban_filters.is_empty() {
+                    let range = self.indices_range(&filters[0]);
+                    if range.len() >= 3000 {
+                        return Box::new(self.single_block_select(range));
+                    }
+                    return Box::new(self.single_select(range));
+                }
+            }
+            _ => {}
+        }
+
+        let all = self.query_ranges(filters);
+        let all = all.collect_vec();
+        let Some((min_idx, min_len, min_indices)) = self.find_min_range(&all) else {
+            return Box::new(std::iter::empty());
+        };
 
         if min_len <= 150 {
             #[cfg(feature = "sa-inverted")]
@@ -697,8 +716,28 @@ impl Segment {
         Box::new(unsafe { self.block_select(all.into_iter(), ban_filters) })
     }
 
+    #[cfg(feature = "sa-bench")]
+    #[inline]
+    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        let flags = FLAGS.load(Ordering::Relaxed) & 0xf;
+        if flags != 0 {
+            self.bench_select(query, flags)
+        } else {
+            self.plan_select(query)
+        }
+    }
+
+    #[cfg(not(feature = "sa-bench"))]
+    #[inline]
+    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        self.plan_select(query)
+    }
+
     #[cfg(feature = "fm-bench")]
     pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        if self.size() == 0 {
+            return Box::new(std::iter::empty());
+        }
         PERF_SA.store(0, Ordering::Relaxed);
         PERF_FM.store(0, Ordering::Relaxed);
         let r = self.do_select(query);
@@ -711,6 +750,9 @@ impl Segment {
 
     #[cfg(not(feature = "fm-bench"))]
     pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+        if self.size() == 0 {
+            return Box::new(std::iter::empty());
+        }
         self.do_select(query)
     }
 }
