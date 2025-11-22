@@ -384,7 +384,7 @@ impl Pvg {
         if self.lru_limit.is_some() {
             self.disk_lru.write().promote(file);
         }
-        let url = src.url.clone();
+        let url = src.url();
         let path = self.page_path(pile);
         Some((url, path))
     }
@@ -588,7 +588,7 @@ impl Pvg {
                 }
                 false
             })
-            .map(|(src, file)| (src.url.clone(), self.page_path(file)))
+            .map(|(src, file)| (src.url(), self.page_path(file)))
             .collect();
         if cnt_404 > 0 {
             warn!("{cnt_404} pages skipped due to 404");
@@ -616,12 +616,7 @@ impl Pvg {
                 }
                 false
             })
-            .map(|page| {
-                (
-                    page.source.url.clone(),
-                    self.page_path(page.source.filename()),
-                )
-            })
+            .map(|page| (page.source.url(), self.page_path(page.source.filename())))
             .collect();
         if cnt_404 > 0 {
             warn!("{cnt_404} pages skipped due to 404");

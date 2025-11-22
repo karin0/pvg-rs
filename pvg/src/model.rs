@@ -31,25 +31,64 @@ impl Dimensions {
 
 #[derive(Debug, Clone)]
 pub struct Source {
-    pub url: String,
-    p: u32,
+    url: String,
+    file_name_pos: u8,
 }
 
-impl TryFrom<String> for Source {
-    type Error = anyhow::Error;
+// https://i.pximg.net/img-original/img/2024/01/23/00/01/44/115400721_p1.jpg
+const URL_PREFIX: &str = "https://i.pximg.net/img-original/img/20";
 
-    fn try_from(url: String) -> Result<Self> {
-        let p = url.rfind('/').context("bad image url")?;
-        Ok(Self {
-            url,
-            p: p as u32 + 1,
-        })
-    }
-}
+const LIMIT_URLS: &[&str] = &[
+    "https://s.pximg.net/common/images/limit_unknown_360.png",
+    "https://s.pximg.net/common/images/limit_mypixiv_360.png",
+    // "https://s.pximg.net/common/images/limit_sanity_level_360.png"
+];
 
 impl Source {
+    fn memory_heap(&self) -> usize {
+        self.url.len()
+    }
+
+    fn try_from_string(mut url: String, iid: IllustId) -> Result<Self> {
+        let mut limited = false;
+        if let Some(stripped) = url.strip_prefix(URL_PREFIX) {
+            url = stripped.to_string();
+            if url.starts_with('h') {
+                bail!("{iid}: bad source url: {url}");
+            }
+        } else if LIMIT_URLS.iter().any(|&s| s == url) {
+            limited = true;
+        } else {
+            warn!("{iid}: unrecognized source url: {url}");
+            if !url.starts_with('h') {
+                bail!("{iid}: bad source url: {url}");
+            }
+        }
+        url.shrink_to_fit();
+        let p = url.rfind('/').context("bad image url")? + 1;
+        let r = Self {
+            url,
+            file_name_pos: p.try_into()?,
+        };
+        if !limited && !r.filename().starts_with(iid.to_string().as_str()) {
+            error!(
+                "{iid}: unable to locate illust id in source url: {}. Downloads may conflict!",
+                r.url()
+            );
+        }
+        Ok(r)
+    }
+
     pub fn filename(&self) -> &str {
-        &self.url[self.p as usize..]
+        &self.url[self.file_name_pos as usize..]
+    }
+
+    pub fn url(&self) -> String {
+        if self.url.starts_with('h') {
+            self.url.clone()
+        } else {
+            format!("{}{}", URL_PREFIX, self.url)
+        }
     }
 }
 
@@ -68,7 +107,10 @@ pub struct Illust {
 
 impl Illust {
     fn memory_url(&self) -> usize {
-        self.pages.iter().map(|p| p.source.url.len()).sum::<usize>()
+        self.pages
+            .iter()
+            .map(|p| p.source.memory_heap())
+            .sum::<usize>()
     }
 
     fn memory(&self) -> usize {
@@ -76,7 +118,7 @@ impl Illust {
             + self
                 .pages
                 .iter()
-                .map(|p| p.source.url.len() + size_of::<Page>())
+                .map(|p| p.source.memory_heap() + size_of::<Page>())
                 .sum::<usize>()
             + self.data.memory()
     }
@@ -165,9 +207,9 @@ impl IllustIndex {
 }
 
 impl Page {
-    pub fn new(url: String, dimensions: Option<Dimensions>) -> Result<Self> {
+    pub fn new(url: String, dimensions: Option<Dimensions>, iid: IllustId) -> Result<Self> {
         Ok(Self {
-            source: url.try_into()?,
+            source: Source::try_from_string(url, iid)?,
             dimensions,
         })
     }
@@ -222,7 +264,7 @@ impl Illust {
                 .clone();
             data = srv.resolve(raw_data, new);
             let dims = Dimensions::new(data.width, data.height)?;
-            vec![Page::new(url, Some(dims))?]
+            vec![Page::new(url, Some(dims), data.id)?]
         } else {
             let mut it = raw_data.meta_pages.iter();
             let first = it.next().context("no pages")?;
@@ -233,9 +275,10 @@ impl Illust {
                     raw_data.width as Dimension,
                     raw_data.height as Dimension,
                 )?),
+                raw_data.id,
             )?);
             for p in it {
-                vec.push(Page::new(p.image_urls.original.clone(), None)?);
+                vec.push(Page::new(p.image_urls.original.clone(), None, raw_data.id)?);
             }
             data = srv.resolve(raw_data, new);
             vec
