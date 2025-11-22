@@ -6,8 +6,11 @@ members = ["pvg", "pixiv"]
 strip = true
 lto = true
 
-[profile.debuginfo]
+[profile.release-thinlto]
 inherits = "release"
+lto = "thin"
+
+[profile.debuginfo]
+inherits = "release-thinlto"
 debug = true
 strip = false
-lto = "thin"
