@@ -83,7 +83,7 @@ impl Index {
         sz
     }
 
-    fn do_select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
+    fn finalize_select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
         if self.dedup {
             let mut seen = HashSet::new();
             iter.filter(|k| seen.insert(*k)).collect_vec()
@@ -94,16 +94,16 @@ impl Index {
 
     pub fn select(&self, query: Query) -> Vec<Key> {
         if let Some(minor) = &self.minor {
-            self.do_select(self.major.select(query).chain(minor.select(query)))
+            self.finalize_select(self.major.select(query).chain(minor.select(query)))
         } else {
-            self.do_select(self.major.select(query))
+            self.finalize_select(self.major.select(query))
         }
     }
 
-    // `dup` should be set if provided `data` may contain duplicates of existing items.
-    pub fn insert(&mut self, data: Vec<(Key, String)>, dup: bool) {
-        // The entire minor SA is "infected" if `dup` is set.
-        self.dedup |= dup;
+    // `update` should be set if provided `data` may contain duplicates of existing items.
+    pub fn insert(&mut self, data: Vec<(Key, String)>, update: bool) {
+        // The entire minor SA is "infected" if `update` is set.
+        self.dedup |= update;
         if let Some(minor) = self.minor.take() {
             let len = data.len();
             let data = data.iter().map(|(k, s)| (*k, s.as_str()));
@@ -126,7 +126,7 @@ impl Index {
 
                     let mut dedup = Dedup::default();
                     dedup.extend(&mut combined, minor.iter());
-                    if dup {
+                    if update {
                         dedup.extend(&mut combined, data);
                     } else {
                         combined.extend(data);
@@ -138,7 +138,7 @@ impl Index {
                     std::mem::take(&mut self.major).extend(minor.iter().chain(data))
                 }
             } else {
-                self.minor = Some(if dup {
+                self.minor = Some(if update {
                     let minor = minor.into_inner();
                     let mut combined = minor.iter().collect_vec();
                     combined.reserve(len);

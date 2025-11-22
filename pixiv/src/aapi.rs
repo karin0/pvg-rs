@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use strum_macros::IntoStaticStr;
 use url::Url;
 
-async fn fin<T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
+async fn finalize<T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
     let r = req.send().await?;
     let st = r.status();
     if st.is_success() || st.is_redirection() {
@@ -35,7 +35,7 @@ impl<S: ApiState> Client<S> {
     }
 
     pub async fn call_url<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        fin(self.app(&(Method::GET, Url::parse(url)?))).await
+        finalize(self.app(&(Method::GET, Url::parse(url)?))).await
     }
 
     pub async fn user_bookmarks_illust<T: DeserializeOwned>(
@@ -43,7 +43,7 @@ impl<S: ApiState> Client<S> {
         user_id: &str,
         restrict: Restrict,
     ) -> Result<T> {
-        fin(self.app(&self.api.user_bookmarks_illust).query(&[
+        finalize(self.app(&self.api.user_bookmarks_illust).query(&[
             ("user_id", user_id),
             ("restrict", restrict.into()),
             ("filter", "for_ios"),
@@ -52,9 +52,10 @@ impl<S: ApiState> Client<S> {
     }
 
     pub async fn illust_follow<T: DeserializeOwned>(&self, restrict: Restrict) -> Result<T> {
-        fin(self
-            .app(&self.api.illust_follow)
-            .query(&[("restrict", Into::<&str>::into(restrict))]))
+        finalize(
+            self.app(&self.api.illust_follow)
+                .query(&[("restrict", Into::<&str>::into(restrict))]),
+        )
         .await
     }
 }
