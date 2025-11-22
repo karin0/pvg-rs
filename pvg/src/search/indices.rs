@@ -28,7 +28,7 @@ pub struct Indices {
     #[cfg(feature = "sa-inverted")]
     occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
     blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
-    pub block_size: Pos,
+    pub block_size: Pos, // ~ sqrt(N), number of indices covered per block. Not the size of a bitset in bits (V)!
 }
 
 impl Indices {
@@ -125,8 +125,10 @@ impl Indices {
         }
     }
 
+    /// Safety: `v` must be the correct capacity for all blocks (`FixedBitSet`).
+    /// `range` is still checked for boundaries.
     #[inline]
-    pub fn join_blocks(&self, range: Range, v: Idx) -> FixedBitSet {
+    pub unsafe fn join_blocks(&self, range: Range, v: Idx) -> FixedBitSet {
         let (l, r) = range;
         let b = self.block_size;
         let start = l.div_ceil(b);
@@ -167,6 +169,7 @@ impl Indices {
         }
 
         for idx in self.slice((l, bound)) {
+            // Safety: `res.len()` == `v`, and all indices are < `v`.
             unsafe {
                 res.insert_unchecked(idx as usize);
             }
@@ -174,6 +177,7 @@ impl Indices {
 
         let bound = l.max(end * b);
         for idx in self.slice((bound, r)) {
+            // Safety: `res.len()` == `v`, and all indices are < `v`.
             unsafe {
                 res.insert_unchecked(idx as usize);
             }

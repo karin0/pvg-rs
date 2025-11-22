@@ -509,14 +509,19 @@ impl Segment {
         ban_filters: &[String],
     ) -> impl Iterator<Item = Key> {
         let v = self.len();
+        // Safety: Caller ensures at least one range exists.
         let first = unsafe { ranges.next().unwrap_unchecked() };
-        let mut res = self.indices.join_blocks(first, v as Idx);
-        for range in ranges {
-            res.intersect_with(&self.indices.join_blocks(range, v as Idx));
-        }
-        for f in ban_filters {
-            res.difference_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
-        }
+        // Safety: `v` == `self.len()`.
+        let res = unsafe {
+            let mut res = self.indices.join_blocks(first, v as Idx);
+            for range in ranges {
+                res.intersect_with(&self.indices.join_blocks(range, v as Idx));
+            }
+            for f in ban_filters {
+                res.difference_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
+            }
+            res
+        };
         res.ones()
             .map(|idx| self.inner.data[idx])
             .collect_vec()
@@ -524,9 +529,9 @@ impl Segment {
     }
 
     fn single_block_select(&self, range: Range) -> impl Iterator<Item = Key> {
-        self.indices
-            .join_blocks(range, self.len() as Idx)
-            .ones()
+        // Safety: `v` == `self.len()`.
+        let res = unsafe { self.indices.join_blocks(range, self.len() as Idx) };
+        res.ones()
             .map(|idx| self.inner.data[idx])
             .collect_vec()
             .into_iter()
@@ -535,15 +540,19 @@ impl Segment {
     /// Safety: `ban_filters` must be non-empty.
     unsafe fn block_ban_select(&self, ban_filters: &[String]) -> impl Iterator<Item = Key> {
         let v: usize = self.len();
-        // Safety: `IllustIndex::select` ensures at least one filter exists.
+        // Safety: Caller ensures `ban_filters` is non-empty.
         let (first, rest) = unsafe { ban_filters.split_first().unwrap_unchecked() };
-        let mut set = self
-            .indices
-            .join_blocks(self.indices_range(first), v as Idx);
-        for f in rest {
-            set.union_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
-        }
-        set.zeroes()
+        // Safety: `v` == `self.len()`.
+        let res = unsafe {
+            let mut set = self
+                .indices
+                .join_blocks(self.indices_range(first), v as Idx);
+            for f in rest {
+                set.union_with(&self.indices.join_blocks(self.indices_range(f), v as Idx));
+            }
+            set
+        };
+        res.zeroes()
             .map(|idx| self.inner.data[idx])
             .collect_vec()
             .into_iter()
