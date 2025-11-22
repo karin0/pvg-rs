@@ -2482,6 +2482,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packedvec"
+version = "1.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a69e0a534dd2e6aefce319af62a0aa0066a76bdfcec0201dfe02df226bc9ec70"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2760,6 +2769,7 @@ dependencies = [
  "lru",
  "lz4",
  "nix",
+ "packedvec",
  "parking_lot",
  "pixiv",
  "pretty_env_logger 0.5.0 (git+https://github.com/karin0/pretty-env-logger.git)",

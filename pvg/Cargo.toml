@@ -39,6 +39,7 @@ integer-sqrt = "0.1"
 similar = { version = "2", optional = true }
 bio = { version = "3", optional = true }
 bytecount = { version = "0.6", optional = true }
+packedvec = { version = "1", optional = true }
 
 dhat = { version = "0.3", optional = true }
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
@@ -49,14 +50,17 @@ pixiv = { path = "../pixiv" }
 vergen-gitcl = { version = "1", features = ["build"] }
 
 [features]
-default = ["sam", "fm-index"]
+default = ["sam", "sa-packed", "fm-index"]
 io-uring = ["actix-files/experimental-io-uring"]
 image = ["dep:image", "dep:rayon"]
 rename2 = ["dep:nix"]
 dhat-heap = ["dep:dhat"]
 sam = ["dep:bio"]
 diff = ["dep:similar"]
-sa-inverted = []
+sa-packed = ["dep:packedvec"]
 fm-index = ["dep:bytecount"]
+sa-inverted = []
+
 sa-bench = []
+sa-packed-bench = []
 fm-bench = []

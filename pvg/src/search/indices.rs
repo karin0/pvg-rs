@@ -4,6 +4,9 @@ use integer_sqrt::IntegerSquareRoot;
 use itertools::Itertools;
 use std::sync::atomic::Ordering;
 
+#[cfg(feature = "sa-packed")]
+use packedvec::PackedVec;
+
 pub type Range = (Pos, Pos);
 
 pub trait RangeExt {
@@ -18,7 +21,10 @@ impl RangeExt for Range {
 }
 
 pub struct Indices {
+    #[cfg(any(feature = "sa-packed-bench", not(feature = "sa-packed")))]
     inner: Vec<Idx>, // len = N, total length of all strings (in bytes)
+    #[cfg(feature = "sa-packed")]
+    packed_inner: PackedVec<Idx>, // packed variant
     #[cfg(feature = "sa-inverted")]
     occurrences: Vec<Vec<Pos>>, // len = V, but total size of inner vecs = N
     blocks: Vec<FixedBitSet>, // len ~ sqrt(N)
@@ -27,12 +33,24 @@ pub struct Indices {
 
 impl Indices {
     pub fn memory(&self, v: usize) -> (usize, usize) {
+        #[cfg(not(feature = "sa-packed"))]
         let n = self.inner.len();
+
+        #[cfg(feature = "sa-packed")]
+        let n = self.packed_inner.len();
+
         let blocks = self.blocks.len() * v / size_of::<fixedbitset::Block>();
-        let r = n * size_of::<Idx>() + blocks + size_of::<Self>();
+
+        let r = blocks + size_of::<Self>();
+
+        #[cfg(any(feature = "sa-packed-bench", not(feature = "sa-packed")))]
+        let r = r + n * size_of::<Idx>();
+
+        #[cfg(feature = "sa-packed")]
+        let r = r + n * self.packed_inner.bwidth() / 8;
 
         #[cfg(feature = "sa-inverted")]
-        let r = r + n;
+        let r = r + n * size_of::<Pos>();
 
         (r, blocks)
     }
@@ -82,8 +100,24 @@ impl Indices {
         };
         blocks.shrink_to_fit();
 
+        #[cfg(feature = "sa-packed")]
+        let packed_inner = {
+            #[cfg(feature = "sa-packed-bench")]
+            let indices = indices.clone();
+
+            let packed = PackedVec::new(indices);
+            let n = packed.len();
+            let width = packed.bwidth();
+            let size = (n * width) >> 23;
+            debug!("packed indices: {n} * {width} bits = {size} MiB");
+            packed
+        };
+
         Indices {
+            #[cfg(any(feature = "sa-packed-bench", not(feature = "sa-packed")))]
             inner: indices,
+            #[cfg(feature = "sa-packed")]
+            packed_inner,
             #[cfg(feature = "sa-inverted")]
             occurrences,
             blocks,
@@ -102,7 +136,7 @@ impl Indices {
         if r <= bound {
             // Same block, r == bound.
             let mut res = FixedBitSet::with_capacity(v as usize);
-            for &idx in &self.inner[l as usize..r as usize] {
+            for idx in self.slice((l, r)) {
                 // Safety: `res.len()` == `v`, and all indices are < `v`.
                 unsafe {
                     res.insert_unchecked(idx as usize);
@@ -132,14 +166,14 @@ impl Indices {
             res = FixedBitSet::with_capacity(v as usize);
         }
 
-        for &idx in &self.inner[l as usize..bound as usize] {
+        for idx in self.slice((l, bound)) {
             unsafe {
                 res.insert_unchecked(idx as usize);
             }
         }
 
         let bound = l.max(end * b);
-        for &idx in &self.inner[bound as usize..r as usize] {
+        for idx in self.slice((bound, r)) {
             unsafe {
                 res.insert_unchecked(idx as usize);
             }
@@ -157,12 +191,88 @@ impl Indices {
             true
         }
     }
+
+    #[cfg(any(feature = "sa-packed-bench", not(feature = "sa-packed")))]
+    #[inline]
+    fn slice_raw(&self, range: Range) -> impl Iterator<Item = Idx> + '_ {
+        self.inner[range.0 as usize..range.1 as usize]
+            .iter()
+            .copied()
+    }
+
+    #[cfg(feature = "sa-packed")]
+    #[inline]
+    fn slice_packed(&self, range: Range) -> impl Iterator<Item = Idx> + Clone + '_ {
+        IndicesSlice {
+            indices: &self.packed_inner,
+            pos: range.0,
+            end: range.1.min(self.packed_inner.len() as Pos),
+        }
+    }
+
+    #[inline]
+    pub fn slice(&self, range: Range) -> impl Iterator<Item = Idx> + '_ {
+        #[cfg(any(feature = "sa-packed-bench", not(feature = "sa-packed")))]
+        let r1 = self.slice_raw(range);
+
+        #[cfg(feature = "sa-packed")]
+        let r2 = self.slice_packed(range);
+
+        #[cfg(feature = "sa-packed-bench")]
+        return {
+            use std::time::Instant;
+
+            let r = r2.clone();
+            let t0 = Instant::now();
+            let vec = r1.collect_vec();
+            let dt = t0.elapsed();
+            let t0 = Instant::now();
+            let vec2 = r2.collect_vec();
+            let dt2 = t0.elapsed();
+            debug!(
+                "Indices{range:?}: slice {dt:?} vs packed {dt2:?} ({:.3}x) (len={})",
+                dt2.as_nanos().max(1) as f64 / dt.as_nanos().max(1) as f64,
+                vec.len()
+            );
+            assert_eq!(vec, vec2);
+            r
+        };
+
+        #[cfg(all(feature = "sa-packed", not(feature = "sa-packed-bench")))]
+        return r2;
+
+        #[cfg(all(not(feature = "sa-packed"), not(feature = "sa-packed-bench")))]
+        r1
+    }
 }
 
-impl std::ops::Index<Range> for Indices {
-    type Output = [Idx];
+#[cfg(feature = "sa-packed")]
+#[derive(Debug, Clone)]
+struct IndicesSlice<'a> {
+    indices: &'a PackedVec<Idx>,
+    pos: Pos,
+    end: Pos,
+}
 
-    fn index(&self, range: Range) -> &Self::Output {
-        &self.inner[range.0 as usize..range.1 as usize]
+#[cfg(feature = "sa-packed")]
+impl Iterator for IndicesSlice<'_> {
+    type Item = Idx;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.end {
+            let pos = self.pos as usize;
+            self.pos += 1;
+            // Safety: pos < end <= indices.len()
+            Some(unsafe { self.indices.get_unchecked(pos) })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = (self.end - self.pos) as usize;
+        (len, Some(len))
     }
 }

@@ -330,9 +330,7 @@ impl Segment {
     fn indices_range(&self, pattern: &str) -> Range {
         let r = self.indices_range_sa(pattern);
         let r2 = self.indices_range_fm(pattern);
-        if r != r2 {
-            warn!("SA and FM ranges differ for pattern '{pattern}': SA={r:?}, FM={r2:?}");
-        }
+        assert_eq!(r, r2);
         r
     }
 
@@ -348,8 +346,8 @@ impl Segment {
 
     #[cfg(feature = "sa-bench")]
     #[inline]
-    fn indices(&self, pattern: &str) -> &[Idx] {
-        &self.indices[self.indices_range(pattern)]
+    fn indices(&self, pattern: &str) -> impl Iterator<Item = Idx> + '_ {
+        self.indices.slice(self.indices_range(pattern))
     }
 
     #[inline]
@@ -368,26 +366,23 @@ impl Segment {
     }
 
     fn single_select(&self, range: Range) -> impl Iterator<Item = Key> + '_ {
-        self.indices[range]
-            .iter()
+        self.indices
+            .slice(range)
             .sorted_unstable()
             .dedup()
-            .copied()
             .map(move |idx| self.inner.data[idx as usize])
     }
 
     fn heuristic_select<'a>(
         &'a self,
         min_idx: Idx,
-        min_indices: &'a [Pos],
+        min_indices: impl Iterator<Item = Idx> + 'a,
         filters: &'a [String],
         ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
         min_indices
-            .iter()
             .sorted_unstable()
             .dedup()
-            .copied()
             .filter_map(move |idx| {
                 let (s, key) = self.inner.resolve(idx);
                 let l = s.len();
@@ -412,16 +407,14 @@ impl Segment {
         &'a self,
         all_ranges: Vec<Range>,
         min_idx: Idx,
-        min_indices: &'a [Pos],
+        min_indices: impl Iterator<Item = Idx> + 'a,
         ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
         let ban_ranges = self.query_ranges(ban_filters).collect_vec();
         let indices = &self.indices;
         min_indices
-            .iter()
             .sorted_unstable()
             .dedup()
-            .copied()
             .filter_map(move |idx| {
                 if all_ranges
                     .iter()
@@ -443,10 +436,12 @@ impl Segment {
         &'a self,
         all_ranges: Vec<Range>,
         min_idx: Idx,
-        min_indices: &'a [Pos],
+        min_indices: impl Iterator<Item = Idx> + 'a,
         ban_filters: &'a [String],
     ) -> Box<dyn Iterator<Item = Key> + 'a> {
-        let mut s = min_indices.iter().copied().collect::<HashSet<Pos>>();
+        use std::collections::HashSet;
+
+        let mut s = min_indices.collect::<HashSet<Pos>>();
         let mut new = HashSet::new();
 
         for (p, range) in all_ranges.into_iter().enumerate() {
@@ -455,8 +450,7 @@ impl Segment {
             if p as Idx == min_idx {
                 continue;
             }
-            let indices = &self.indices[range];
-            for &idx in indices {
+            for idx in self.indices.slice(range) {
                 if s.contains(&idx) {
                     new.insert(idx);
                 }
@@ -469,10 +463,10 @@ impl Segment {
         }
 
         for range in ban_filters {
+            STATS.fetch_add(range.len() as u32, Ordering::Relaxed);
             let indices = self.indices(range);
-            STATS.fetch_add(indices.len() as u32, Ordering::Relaxed);
             for idx in indices {
-                s.remove(idx);
+                s.remove(&idx);
             }
         }
         Box::new(
@@ -487,6 +481,8 @@ impl Segment {
         &'a self,
         ban_filters: &'a [String],
     ) -> impl Iterator<Item = Key> + 'a {
+        use std::collections::HashSet;
+
         let ban_idxs = ban_filters
             .iter()
             .flat_map(|patt| self.indices(patt))
@@ -562,14 +558,14 @@ impl Segment {
         let mut s = BTreeSet::new();
         s.extend(0..self.len() as Pos);
         for range in ranges {
-            let indices = &self.indices[range];
-            let t = indices.iter().copied().collect::<BTreeSet<_>>();
+            let indices = self.indices.slice(range);
+            let t = indices.collect::<BTreeSet<_>>();
             STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.intersection(&t).copied().collect();
         }
         for range in ban_ranges {
-            let indices = &self.indices[range];
-            let t: BTreeSet<u32> = indices.iter().copied().collect::<BTreeSet<_>>();
+            let indices = self.indices.slice(range);
+            let t: BTreeSet<u32> = indices.collect::<BTreeSet<_>>();
             STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.difference(&t).copied().collect();
         }
@@ -659,7 +655,7 @@ impl Segment {
             debug!("indices lengths: {lens:?}, c = {c:.6}");
         }
 
-        let min_indices = &self.indices[min];
+        let min_indices = self.indices.slice(min);
 
         #[cfg(feature = "sa-bench")]
         if flags == 0x1 {
