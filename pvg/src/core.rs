@@ -219,12 +219,11 @@ impl Pvg {
     pub async fn save_cache(&self) -> Result<()> {
         let s = self.dump_cache().await?;
         let len = s.len();
-        tokio::fs::write(&self.conf.cache_file, s).await?;
-        info!(
-            "cache: written {} bytes into {}",
-            len,
-            self.conf.cache_file.display()
-        );
+        let file = &self.conf.cache_file;
+        let tmp = file.with_extension("tmp");
+        tokio::fs::write(&tmp, &s).await?;
+        tokio::fs::rename(&tmp, &file).await?;
+        info!("cache: written {} bytes into {}", len, file.display());
         Ok(())
     }
 
@@ -712,7 +711,7 @@ impl Pvg {
             bail!("failed to download {cnt_fail} pages out from {cnt}");
         }
         info!(
-            "downloaded {cnt} pages ({} MiB in {dt:.3?}, {:.3} KiB/s)",
+            "downloaded {cnt} pages ({:.3} MiB in {dt:.3?}, {:.3} KiB/s)",
             tot_size as f64 / 1024.0 / 1024.0,
             tot_size as f64 / (dt.as_secs_f64() * 1024.0),
         );
