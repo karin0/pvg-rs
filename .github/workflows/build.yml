@@ -86,6 +86,8 @@ jobs:
           export DATABASE_URL=sqlite://fav.db?mode=ro
 
           cargo update
+          bash ci.sh
+
           target=${{ matrix.target }}
           ${CARGO:=cargo} build --release --target $target
 
