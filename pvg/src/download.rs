@@ -84,7 +84,7 @@ impl DownloadingFile {
             Ok(f) => drop(f),
             Err(e) => {
                 self.rollback().await;
-                bail!("failed to open target {:?}: {}", path, e);
+                bail!("failed to open target {}: {e:?}", path.display());
             }
         }
 

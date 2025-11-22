@@ -1,7 +1,6 @@
 use crate::critical;
-use crate::illust::{IllustData, IllustService};
+use crate::illust::{IllustData, IllustService, NonZeroDimension};
 use crate::store::Store;
-use crate::util::normalized;
 use anyhow::{Context, Result, bail};
 use itertools::Itertools;
 use pixiv::IllustId;
@@ -10,19 +9,19 @@ use serde::Deserialize;
 use serde_json::value::Value as JsonValue;
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 use std::mem::size_of;
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
-use tokio::time::Instant;
 
 #[cfg(feature = "sam")]
 use crate::search::{Index as SearchIndex, Query};
 
+pub use crate::illust::Dimension;
+
 #[derive(Debug, Clone, Copy)]
-pub struct Dimensions(pub NonZeroU32, pub NonZeroU32);
+pub struct Dimensions(pub NonZeroDimension, pub NonZeroDimension);
 
 impl Dimensions {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
+    pub fn new(width: Dimension, height: Dimension) -> Result<Self> {
         Ok(Self(
             width.try_into().context("width is zero")?,
             height.try_into().context("height is zero")?,
@@ -174,13 +173,14 @@ impl Page {
     }
 }
 
+#[cfg(feature = "sam")]
 fn make_intro(data: &IllustData, srv: &IllustService) -> String {
     let mut s = format!("{}\\{}", data.title, srv.get_user_name(data));
     for t in srv.get_tags(data) {
         s.push('\\');
         s.push_str(t);
     }
-    s = normalized(&s);
+    s = crate::util::normalized(&s);
     s.push_str("\\$s");
     s.push_str(&data.sanity_level.to_string());
     s.push_str("\\$x");
@@ -211,43 +211,50 @@ impl Illust {
         Self::from_raw(data, srv, new)
     }
 
-    fn from_raw(data: api::Illust, srv: &mut IllustService, new: bool) -> Result<Self> {
-        let pages = if data.page_count == 1 {
-            vec![Page::new(
-                data.meta_single_page
-                    .original_image_url
-                    .as_ref()
-                    .context("Bad image url")?
-                    .clone(),
-                Some(Dimensions::new(data.width, data.height)?),
-            )?]
+    fn from_raw(raw_data: api::Illust, srv: &mut IllustService, new: bool) -> Result<Self> {
+        let data;
+        let pages = if raw_data.page_count == 1 {
+            let url = raw_data
+                .meta_single_page
+                .original_image_url
+                .as_ref()
+                .context("Bad image url")?
+                .clone();
+            data = srv.resolve(raw_data, new);
+            let dims = Dimensions::new(data.width, data.height)?;
+            vec![Page::new(url, Some(dims))?]
         } else {
-            let mut it = data.meta_pages.iter();
+            let mut it = raw_data.meta_pages.iter();
             let first = it.next().context("no pages")?;
-            let mut vec = Vec::with_capacity(data.page_count as usize);
+            let mut vec = Vec::with_capacity(raw_data.page_count as usize);
             vec.push(Page::new(
                 first.image_urls.original.clone(),
-                Some(Dimensions::new(data.width, data.height)?),
+                Some(Dimensions::new(
+                    raw_data.width as Dimension,
+                    raw_data.height as Dimension,
+                )?),
             )?);
             for p in it {
                 vec.push(Page::new(p.image_urls.original.clone(), None)?);
             }
+            data = srv.resolve(raw_data, new);
             vec
         };
 
         Ok(Self {
-            data: srv.resolve(data, new),
+            data,
             pages,
             deleted: false,
         })
     }
 
+    #[cfg(feature = "sam")]
     fn intro(&self, srv: &IllustService) -> String {
         make_intro(&self.data, srv)
     }
 }
 
-pub type DimCache = Vec<(IllustId, Vec<u32>)>;
+pub type DimCache = Vec<(IllustId, Vec<Dimension>)>;
 
 #[derive(Deserialize)]
 struct OnlyId {
@@ -355,7 +362,7 @@ impl IllustIndex {
     }
 
     #[allow(dead_code)]
-    fn dump_dims_cache(&self) -> Vec<(IllustId, Vec<u32>)> {
+    fn dump_dims_cache(&self) -> Vec<(IllustId, Vec<Dimension>)> {
         let mut res = vec![];
         for i in self.iter() {
             if i.data.page_count > 1 {
@@ -677,8 +684,9 @@ impl IllustIndex {
         delta
     }
 
+    #[cfg(feature = "sam")]
     fn do_select(&self, kind: u32, query: Query) -> Vec<IllustId> {
-        let t0 = Instant::now();
+        let t0 = std::time::Instant::now();
         let res = self.sa.select(query);
         let dt = t0.elapsed();
         let st = SearchIndex::stats();
@@ -695,13 +703,22 @@ impl IllustIndex {
         filters: &[String],
         ban_filters: &[String],
     ) -> Box<dyn DoubleEndedIterator<Item = &Illust> + '_> {
-        if filters.is_empty() && ban_filters.is_empty() {
-            return Box::new(self.iter());
+        #[cfg(not(feature = "sam"))]
+        {
+            error!("not built with sam feature, select is disabled");
+            let _ = (filters, ban_filters);
+            Box::new(self.iter())
         }
-        let query = Query::new(filters, ban_filters);
 
         #[cfg(feature = "sam")]
         {
+            // `Query` requires at least one filter.
+            if filters.is_empty() && ban_filters.is_empty() {
+                return Box::new(self.iter());
+            }
+
+            let query = Query::new(filters, ban_filters);
+
             #[cfg(feature = "sa-bench")]
             SearchIndex::set_flags(0);
             let ans = self.do_select(0, query);
@@ -709,7 +726,7 @@ impl IllustIndex {
             #[cfg(feature = "sa-bench")]
             {
                 // Warm up
-                let t0 = Instant::now();
+                let t0 = std::time::Instant::now();
                 for kind in 0..5 {
                     SearchIndex::set_flags(kind << 1 | 1);
                     self.sa.select(query);
@@ -754,11 +771,6 @@ impl IllustIndex {
             }
 
             Box::new(ans.into_iter().map(move |id| &self.map[&id]))
-        }
-        #[cfg(not(feature = "sam"))]
-        {
-            error!("not built with sam feature, select is disabled");
-            Box::new(std::iter::empty())
         }
     }
 

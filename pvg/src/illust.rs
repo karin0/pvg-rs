@@ -9,6 +9,9 @@ use string_interner::{DefaultSymbol, StringInterner, backend::BucketBackend as B
 type TagId = DefaultSymbol;
 type UserNameId = DefaultSymbol;
 
+pub type Dimension = u16;
+pub type NonZeroDimension = std::num::NonZeroU16;
+
 struct User {
     cnt: BTreeMap<UserNameId, u32>,
     max: (UserNameId, u32),
@@ -39,8 +42,8 @@ pub struct IllustData {
     pub title: String,
     pub user_id: u32,
     pub original_user_name: UserNameId,
-    pub width: u16,
-    pub height: u16,
+    pub width: Dimension,
+    pub height: Dimension,
     pub page_count: u16,
     pub tags: Vec<TagId>,
     pub sanity_level: u8,

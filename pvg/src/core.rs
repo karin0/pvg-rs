@@ -1,7 +1,7 @@
 use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
-use crate::model::{Illust, IllustIndex};
+use crate::model::{Dimension, Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
@@ -36,7 +36,7 @@ use rayon::prelude::*;
 #[derive(Deserialize, Default)]
 struct LoadedCache {
     token: Option<AuthedState>,
-    dims: Option<Vec<(IllustId, Vec<u32>)>>,
+    dims: Option<Vec<(IllustId, Vec<Dimension>)>>,
     #[serde(default)]
     not_found: HashSet<PathBuf>,
     #[serde(default)]
@@ -818,7 +818,7 @@ impl Pvg {
 }
 
 #[derive(Debug, Serialize)]
-struct SelectedPage<'a>(u32, u32, &'a str, &'a str);
+struct SelectedPage<'a>(Dimension, Dimension, &'a str, &'a str);
 
 #[derive(Debug, Serialize)]
 struct SelectedIllust<'a>(
