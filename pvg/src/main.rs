@@ -83,7 +83,6 @@ async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl 
     let ban_filters: Option<Vec<_>> = payload
         .ban_filters
         .map(|v| v.into_iter().map(|s| normalized(&s)).collect());
-    info!("select: {filters:?} {ban_filters:?}");
     let r = app.select(filters, ban_filters).await.map_err(mapper)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -180,22 +179,17 @@ struct EnvResponse<'a> {
 }
 
 const VERSION: &str = env!("VERGEN_GIT_DESCRIBE");
+const FEATURES: &str = env!("VERGEN_CARGO_FEATURES");
 
-fn do_get_env(app: &Pvg) -> EnvResponse<'_> {
+#[get("/env")]
+async fn get_env(app: web::Data<Pvg>) -> impl Responder {
     let r = EnvResponse {
         user: UserResponse {
             name: &app.conf.username,
         },
         ver: VERSION,
-        features: env!("PVG_FEATURES"),
+        features: FEATURES,
     };
-    info!("env: {r:?}");
-    r
-}
-
-#[get("/env")]
-async fn get_env(app: web::Data<Pvg>) -> impl Responder {
-    let r = do_get_env(&app);
     let r = serde_json::to_string(&r)?;
     io::Result::Ok(HttpResponse::Ok().content_type(ContentType::json()).body(r))
 }
@@ -217,9 +211,19 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        "{} {} ({VERSION})",
+        "{} {} ({VERSION}) with {FEATURES} opt {}{} rustc {} for {} on {} at {}",
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        env!("VERGEN_CARGO_OPT_LEVEL"),
+        if env!("VERGEN_CARGO_DEBUG") == "true" {
+            " debug"
+        } else {
+            ""
+        },
+        env!("VERGEN_RUSTC_SEMVER"),
+        env!("VERGEN_RUSTC_HOST_TRIPLE"),
+        env!("VERGEN_SYSINFO_OS_VERSION"),
+        env!("VERGEN_BUILD_TIMESTAMP"),
     );
     let (tx, rx) = oneshot::channel();
     let mut tx = Some(tx);
@@ -236,7 +240,6 @@ async fn main() -> Result<()> {
         }
     })?;
     let data = web::Data::new(Pvg::new().await?);
-    do_get_env(&data);
     let pvg = data.clone().into_inner();
 
     if pvg.is_worker() {

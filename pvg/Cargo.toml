@@ -47,6 +47,7 @@ pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 pixiv = { path = "../pixiv" }
 
 [build-dependencies]
+vergen = { version = "9", features = ["build", "cargo", "rustc", "si"] }
 vergen-gitcl = { version = "1", features = ["build"] }
 
 [features]
