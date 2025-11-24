@@ -18,17 +18,18 @@ use crate::core::Pvg;
 use crate::util::normalized;
 use actix_cors::Cors;
 use actix_files::NamedFile;
-use actix_web::http::{StatusCode, header::ContentType};
+use actix_web::http::{
+    StatusCode,
+    header::{ContentType, LOCATION},
+};
 use actix_web::{
-    App, Either, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, Responder, get, post,
-    web,
+    App, Either, HttpResponse, HttpResponseBuilder, HttpServer, Responder, get, post, web,
 };
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::io;
-use std::path::Path;
 use tokio::sync::oneshot;
 
 #[macro_use]
@@ -50,8 +51,6 @@ async fn image(
             Ok(f) => Ok(Either::Left(f)),
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
-                    // info!("refusing to download {:?}", path);
-                    // return Err(io::Error::new(io::ErrorKind::Other, "bye"));
                     let resp = app.download(&src, path).await.map_err(mapper)?;
                     Ok(Either::Right(
                         HttpResponseBuilder::new(StatusCode::OK).streaming(resp),
@@ -61,7 +60,7 @@ async fn image(
                 }
             }
         },
-        _ => Err(io::Error::new(io::ErrorKind::NotFound, "Not found")),
+        _ => Err(io::Error::from(io::ErrorKind::NotFound)),
     }
 }
 
@@ -159,11 +158,14 @@ async fn do_upscale(app: web::Data<Pvg>, form: web::Form<UpscaleForm>) -> io::Re
     NamedFile::open_async(path).await
 }
 
+const STATIC_PATH_PREFIX: &str = "/s/";
+const INDEX_PATH: &str = concat!("/s/", "index.html");
+
 #[get("/")]
-async fn index(req: HttpRequest) -> impl Responder {
-    #[allow(clippy::explicit_auto_deref)]
-    let index: &'static Path = *req.app_data().unwrap();
-    NamedFile::open_async(index).await
+async fn index() -> impl Responder {
+    HttpResponse::Found()
+        .append_header((LOCATION, INDEX_PATH))
+        .finish()
 }
 
 #[derive(Debug, Serialize)]
@@ -250,16 +252,13 @@ async fn main() -> Result<()> {
         });
     }
 
-    let static_dir: &'static Path = Box::leak(pvg.conf.static_dir.clone().into_boxed_path());
-    let static_index: &'static Path = Box::leak(static_dir.join("index.html").into_boxed_path());
+    let static_dir = pvg.conf.static_dir.clone();
     let addr = pvg.conf.addr;
     let server = HttpServer::new(move || {
-        let statics = actix_files::Files::new("/s", static_dir);
         let app = App::new()
             .wrap(Cors::permissive())
             .app_data(data.clone())
-            .app_data(static_index)
-            .service(statics)
+            .service(actix_files::Files::new(STATIC_PATH_PREFIX, &static_dir).prefer_utf8(true))
             .service(image)
             .service(select)
             .service(quick_update)

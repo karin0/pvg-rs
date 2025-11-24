@@ -49,7 +49,7 @@ impl Source {
         self.url.len()
     }
 
-    fn try_from_string(mut url: String, iid: IllustId) -> Result<Self> {
+    fn try_from_string(mut url: String, iid: IllustId) -> Result<(Self, bool)> {
         let mut limited = false;
         if let Some(stripped) = url.strip_prefix(URL_PREFIX) {
             url = stripped.to_string();
@@ -76,7 +76,7 @@ impl Source {
                 r.url()
             );
         }
-        Ok(r)
+        Ok((r, limited))
     }
 
     pub fn filename(&self) -> &str {
@@ -207,11 +207,9 @@ impl IllustIndex {
 }
 
 impl Page {
-    pub fn new(url: String, dimensions: Option<Dimensions>, iid: IllustId) -> Result<Self> {
-        Ok(Self {
-            source: Source::try_from_string(url, iid)?,
-            dimensions,
-        })
+    pub fn new(url: String, dimensions: Option<Dimensions>, iid: IllustId) -> Result<(Self, bool)> {
+        let (source, limited) = Source::try_from_string(url, iid)?;
+        Ok((Self { source, dimensions }, limited))
     }
 }
 
@@ -253,41 +251,54 @@ impl Illust {
         Self::from_raw(data, srv, new)
     }
 
-    fn from_raw(raw_data: api::Illust, srv: &mut IllustService, new: bool) -> Result<Self> {
+    fn from_raw(mut raw_data: api::Illust, srv: &mut IllustService, new: bool) -> Result<Self> {
         let data;
+        let deleted;
         let pages = if raw_data.page_count == 1 {
             let url = raw_data
                 .meta_single_page
                 .original_image_url
-                .as_ref()
-                .context("Bad image url")?
-                .clone();
+                .as_mut()
+                .context("Bad image url")?;
+            let dims = Dimensions::new(raw_data.width.try_into()?, raw_data.height.try_into()?)?;
+            let (page, limited) = Page::new(std::mem::take(url), Some(dims), raw_data.id)?;
             data = srv.resolve(raw_data, new);
-            let dims = Dimensions::new(data.width, data.height)?;
-            vec![Page::new(url, Some(dims), data.id)?]
+            deleted = limited;
+            vec![page]
         } else {
-            let mut it = raw_data.meta_pages.iter();
-            let first = it.next().context("no pages")?;
-            let mut vec = Vec::with_capacity(raw_data.page_count as usize);
-            vec.push(Page::new(
-                first.image_urls.original.clone(),
-                Some(Dimensions::new(
-                    raw_data.width as Dimension,
-                    raw_data.height as Dimension,
-                )?),
-                raw_data.id,
+            deleted = false;
+            assert_eq!(raw_data.page_count as usize, raw_data.meta_pages.len());
+            assert!(raw_data.page_count >= 2);
+            let mut dims = Some(Dimensions::new(
+                raw_data.width as Dimension,
+                raw_data.height as Dimension,
             )?);
-            for p in it {
-                vec.push(Page::new(p.image_urls.original.clone(), None, raw_data.id)?);
-            }
+            let pages = raw_data
+                .meta_pages
+                .iter_mut()
+                .map(|p| {
+                    let (page, limited) = Page::new(
+                        std::mem::take(&mut p.image_urls.original),
+                        dims.take(),
+                        raw_data.id,
+                    )?;
+                    if limited {
+                        error!(
+                            "{} ({}) - Page is removed from upstream?",
+                            raw_data.id, raw_data.title,
+                        );
+                    }
+                    Ok(page)
+                })
+                .collect::<Result<Vec<_>>>()?;
             data = srv.resolve(raw_data, new);
-            vec
+            pages
         };
 
         Ok(Self {
             data,
             pages,
-            deleted: false,
+            deleted,
         })
     }
 
@@ -327,22 +338,26 @@ impl IllustIndex {
 
         let mut ids = Vec::with_capacity(illusts.len());
         let mut srv = IllustService::new();
+        let mut deleted: IllustId = 0;
 
         let map = illusts
             .into_iter()
             .map(|data| {
                 // FIXME: do not unwrap
-                let o = Illust::from_bytes(&data, &mut srv, true).unwrap();
+                let o = Illust::from_bytes(&data, &mut srv, true)?;
+                if o.deleted {
+                    deleted += 1;
+                }
 
                 ids.push(o.data.id);
 
-                (o.data.id, o)
+                Ok((o.data.id, o))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let stats = Store::stats();
         info!(
-            "parsed {} illlusts from {} MiB (decompressed from {} MiB in {:.3?})",
+            "parsed {} illlusts ({deleted} deleted) from {} MiB (decompressed from {} MiB in {:.3?})",
             map.len(),
             size >> 20,
             stats.0 >> 20,
@@ -431,6 +446,10 @@ impl IllustIndex {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn count_pages(&self) -> usize {
+        self.map.values().map(|i| i.pages.len()).sum()
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Illust> {
@@ -590,16 +609,14 @@ impl IllustIndex {
         Ok(status == StagedStatus::New)
     }
 
-    pub fn peek(&self, stage_id: usize) -> impl ExactSizeIterator<Item = IllustId> + Clone + '_ {
-        self.stages[stage_id].todo.iter().map(|item| item.id)
-    }
-
-    pub fn count_new(&self, stage_id: usize) -> usize {
+    pub fn peek(
+        &self,
+        stage_id: usize,
+    ) -> impl ExactSizeIterator<Item = (IllustId, bool)> + Clone + '_ {
         self.stages[stage_id]
             .todo
             .iter()
-            .filter(|item| item.status == StagedStatus::New)
-            .count()
+            .map(|item| (item.id, item.status == StagedStatus::New))
     }
 
     // The staged illusts are already applied to `self.map``, we commit them to
@@ -810,6 +827,8 @@ impl IllustIndex {
                         let s = a.into_iter().take(10).copied().collect_vec();
                         error!("only in ans ({n}): {s:?}");
                     }
+
+                    panic!("sa{kind} inconsistent!");
                 }
             }
 
