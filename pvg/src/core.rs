@@ -159,8 +159,8 @@ impl Pvg {
         let uid = api.state.user.id.to_string();
 
         let index_size = nav.len();
-        let (lru, lru_limit) =
-            DiskLru::load(index_size, &config.pix_dir, config.cache_limit).await?;
+        let pages = nav.count_pages();
+        let (lru, lru_limit) = DiskLru::load(pages, &config.pix_dir, config.cache_limit).await?;
 
         let upscaler = if let Some(ref path) = config.upscaler_path {
             Some(Upscaler::new(path.clone(), &config).await?)
@@ -169,8 +169,7 @@ impl Pvg {
         };
 
         info!(
-            "initialized {} illusts, {} not_founds, {} worker_to_downloads in {} ms",
-            index_size,
+            "initialized {index_size} illusts ({pages} pages), {} not_founds, {} worker_to_downloads in {} ms",
             not_found.len(),
             worker_to_download.len(),
             t.elapsed().as_millis(),
@@ -332,18 +331,23 @@ impl Pvg {
         res: &mut Vec<IllustId>,
     ) {
         {
-            let a = index.peek(stage);
-            let n = a.len();
+            let it = index.peek(stage);
+            let n = it.len();
             if n > 0 {
-                let s = a.clone().map(|i| i.to_string()).join(", ");
-                res.extend(a);
-                let new = index.count_new(stage);
-                let level = if new > 0 {
-                    log::Level::Info
-                } else {
-                    log::Level::Debug
-                };
-                log!(level, "{name}: {n} illusts ({new} new): {s}");
+                res.extend(it.clone().map(|(id, _)| id));
+                let it_new = it.clone().filter(|&(_, is_new)| is_new);
+                let new = it_new.clone().count();
+                if new > 0 {
+                    let s_new = it_new.map(|(id, _)| id).join(", ");
+                    let s_old = it
+                        .filter(|&(_, is_new)| !is_new)
+                        .map(|(id, _)| id)
+                        .join(", ");
+                    info!("{name}: {n} illusts ({new} new): {s_new} | {s_old}");
+                } else if log::log_enabled!(log::Level::Debug) {
+                    let s_all = it.map(|(id, _)| id).join(", ");
+                    debug!("{name}: {n} illusts updated: {s_all}");
+                }
             }
         }
         index.commit(stage).await;
@@ -953,52 +957,50 @@ impl Pvg {
     }
 
     async fn worker_body(&self) -> Result<()> {
-        let mut ids = self.quick_update_worker().await?;
+        let ids = self.quick_update_worker().await?;
 
         // What were we forgetting to download?
-        let mut todo = self.worker_to_download.lock().await;
-        let last_todo = !todo.is_empty();
+        let mut wal = self.worker_to_download.lock().await;
+        let has_wal = !wal.is_empty();
 
-        if todo.is_empty() {
-            *todo = ids;
-        } else {
-            let old_n = todo.len();
-            todo.extend(ids);
+        if has_wal {
+            let old_n = wal.len();
+            wal.extend(ids);
             warn!(
                 "worker: remaining {old_n} illusts to download (total {})",
-                todo.len()
+                wal.len()
             );
+        } else {
+            *wal = ids;
         }
 
-        if todo.is_empty() {
+        if wal.is_empty() {
             // Nothing to do.
             return Ok(());
         }
 
-        #[allow(clippy::assigning_clones)]
-        {
-            ids = todo.clone();
-        }
+        // Dropping the lock, prevent `save_cache()` from being blocked.
+        let todo = wal.clone();
+        drop(wal);
 
-        // Dropping the lock, allowing interruptions while downloading and resume later.
-        drop(todo);
-
-        let dirty_cache = match self.download_all_worker(&ids).await {
+        let dirty_cache = match self.download_all_worker(&todo).await {
             Ok((n, dirty_404)) => {
                 debug!("worker: downloaded {n} illusts");
-                dirty_404 || last_todo
+                dirty_404 || has_wal
             }
             Err(e) => {
                 error!("download_all_worker: {e}");
-                last_todo
+                has_wal
             }
         };
 
         // Clear them even if failed to download, as we never retry for now.
         // Some illusts just keep failing with 404/500.
         {
-            let mut todo = self.worker_to_download.lock().await;
-            todo.clear();
+            let mut wal = self.worker_to_download.lock().await;
+            // We are the only writer.
+            assert_eq!(*wal, todo);
+            wal.clear();
         }
 
         if dirty_cache {

@@ -42,7 +42,9 @@ pub struct IllustData {
     pub title: String,
     pub user_id: u32,
     pub original_user_name: UserNameId,
+    #[allow(dead_code)]
     pub width: Dimension,
+    #[allow(dead_code)]
     pub height: Dimension,
     pub page_count: u16,
     pub tags: Vec<TagId>,
