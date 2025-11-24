@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
         }
     }
     info!("shutting down server");
-    pvg.save_cache().await?;
     handle.stop(true).await;
+    pvg.close().await?;
     Ok(())
 }

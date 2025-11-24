@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, RwLockWriteGuard, Semaphore, mpsc};
@@ -74,30 +74,37 @@ pub struct BookmarkPage {
 
 static DOWNLOAD_SEMA: Semaphore = Semaphore::const_new(20);
 
-fn lock_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    let lock;
-    let r = match File::open(path) {
+fn lock_pid_file<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path = path.as_ref();
+    match File::create_new(path) {
         Ok(file) => {
             file.try_lock_exclusive()?;
-            let reader = std::io::BufReader::new(file);
-            let r = Some(serde_json::from_reader::<_, T>(reader)?);
-            lock = File::open(path)?;
-            r
+            writeln!(&file, "{}", std::process::id())?;
+            std::mem::forget(file); // keep the lock held until process exit
+            Ok(())
         }
+        Err(e) => {
+            if e.kind() == ErrorKind::AlreadyExists {
+                bail!("{}: another instance is running?", path.display());
+            }
+            Err(e.into())
+        }
+    }
+}
+
+fn parse_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(serde_json::from_reader::<_, T>(BufReader::new(file))?)),
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
                 info!("{}: not exist, creating", path.display());
-                let file = File::create(path)?;
-                lock = file;
-                None
+                File::create(path)?;
+                Ok(None)
             } else {
-                return Err(e.into());
+                Err(e.into())
             }
         }
-    };
-    lock.try_lock_exclusive()?;
-    std::mem::forget(lock); // keep the lock held until process exit
-    Ok(r)
+    }
 }
 
 impl Pvg {
@@ -107,7 +114,8 @@ impl Pvg {
         let refresh_token = std::mem::replace(&mut config.refresh_token, "*".to_owned());
         info!("config: {config:?}");
 
-        let cache = lock_file::<LoadedCache>(&config.cache_file)?;
+        let lock_path: PathBuf = config.db_file.with_added_extension("pid");
+        lock_pid_file(lock_path)?;
 
         if let Some(proxy) = &config.proxy {
             unsafe {
@@ -131,7 +139,7 @@ impl Pvg {
 
         let not_found;
         let worker_to_download;
-        let api = if let Some(cache) = cache {
+        let api = if let Some(cache) = parse_file::<LoadedCache>(&config.cache_file)? {
             if let Some(dims) = cache.dims {
                 nav.load_dims_cache(dims)?;
             } else {
@@ -190,6 +198,13 @@ impl Pvg {
         })
     }
 
+    pub async fn close(&self) -> Result<()> {
+        self.save_cache().await?;
+        let lock_path = self.conf.db_file.with_added_extension("pid");
+        fs::remove_file(lock_path).await?;
+        Ok(())
+    }
+
     pub fn is_worker(&self) -> bool {
         self.conf.worker_delay_secs > 0
     }
@@ -215,7 +230,7 @@ impl Pvg {
         serde_json::to_string(&cache)
     }
 
-    pub async fn save_cache(&self) -> Result<()> {
+    async fn save_cache(&self) -> Result<()> {
         let s = self.dump_cache().await?;
         let len = s.len();
         let file = &self.conf.cache_file;
