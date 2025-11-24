@@ -2,15 +2,23 @@
 
 [![Build](https://github.com/karin0/pvg-rs/actions/workflows/build.yml/badge.svg)](https://github.com/karin0/pvg-rs/actions/workflows/build.yml)
 
-Explore, filter and download illustrations from your [pixiv](https://www.pixiv.net/) bookmark.
+Explore, filter, and download artworks from your [pixiv](https://www.pixiv.net/) bookmarks.
 
 ## Features
 
-- Sync with your pixiv bookmark incrementally
-- Find or exclude bookmarked illustrations by tags, title or author
-- Parallel and reliable download of bookmarked illustrations
-- Access from local machine or network via a responsive [Web UI](https://github.com/karin0/pvg-app)
+- Sync with your pixiv bookmarks incrementally
+- Find or exclude bookmarked artworks by tags, title, or author
+- Parallel and reliable download of bookmarked artworks
+- Local and remote access via a responsive [Web UI](https://github.com/karin0/pvg-app)
 - Cross-platform (Windows, Linux, and Android via [Termux](https://termux.com/) are tested)
+
+## Highlights
+
+- Custom [FTS engine](pvg/src/search) with FM-Index and incremental LSM for instant multi-keyword querying
+  - Suffix-based indexing for accurate substring search in CJK titles and tags
+  - Optimized with square-root decomposed bitmaps and query planner to achieve <1ms latency on 100K+ collections
+- Robust and efficient download manager with asynchronous I/O and file transactions for data integrity
+- Minimal resource usage for local-first experience on resource-constrained devices
 
 ## Screenshot
 
@@ -25,8 +33,8 @@ Explore, filter and download illustrations from your [pixiv](https://www.pixiv.n
   - A minimal example:
     ```json
     {
-        "username": "<your pixiv username>",
-        "refresh_token": "<your refresh token>"
+      "username": "<your pixiv username>",
+      "refresh_token": "<your refresh token>"
     }
     ```
 - Run `pvg` or `pvg.exe` to start the server
@@ -35,18 +43,18 @@ Explore, filter and download illustrations from your [pixiv](https://www.pixiv.n
 
 ## Configuration
 
-The following options can be specified in the `config.json` file:
+The following options can be specified in `config.json`:
 
 - `username`: Your pixiv username (required)
 - `refresh_token`: Your pixiv refresh token (required)
-- `port`: The port to listen on (default: `5678`)
-- `host`: The host to listen on (default: `"127.0.0.1"`)
+- `port`: Port to listen on (default: `5678`)
+- `host`: Interface to listen on (default: `"127.0.0.1"`)
   - Specify a LAN address or `"0.0.0.0"` to allow access from network
-- `proxy`: The proxy to use for network requests
+- `proxy`: Proxy to use for network requests
   - Example: `"http://127.0.0.1:8080"`
 - `safe_mode`: Turn on to show only illustions with a safe sanity_level (default: `false`)
-- `home`: The directory to store the index and downloaded files (default: `.`)
-  - Illustrations are saved in `<home>/pix`
+- `home`: Path to the directory to store data and index (default: `.`)
+  - Downloaded artworks are saved in `<home>/pix`
 
 ## Build
 
