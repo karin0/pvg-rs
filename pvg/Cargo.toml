@@ -41,7 +41,7 @@ integer-sqrt = { version = "0.1", optional = true }
 bio = { version = "3", optional = true }
 bytecount = { version = "0.6", optional = true }
 packedvec = { version = "1", optional = true }
-nix = { version = "0.30", features = ["fs"], optional = true }
+nix = { version = "0.31", features = ["fs"], optional = true }
 dhat = { version = "0.3", optional = true }
 
 pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
@@ -49,7 +49,7 @@ pixiv = { path = "../pixiv" }
 
 [build-dependencies]
 vergen = { version = "9", features = ["build", "cargo", "rustc", "si"] }
-vergen-gitcl = { version = "1", features = ["build"] }
+vergen-gitcl = { version = "9", features = ["build"] }
 
 [features]
 default = ["sa-packed", "fm-index"]
