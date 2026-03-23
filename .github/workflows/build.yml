@@ -53,7 +53,7 @@ jobs:
           echo "Adding GNU tar to PATH"
           echo C:\Program Files\Git\usr\bin>>"%GITHUB_PATH%"
 
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/bin/
@@ -126,8 +126,8 @@ jobs:
           zip -r ../"$ZIP_FILE" *
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-      - uses: shogo82148/actions-upload-release-asset@v1
+      - uses: softprops/action-gh-release@v2
         if: ${{ github.event_name == 'release' }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ${{ env.ZIP_FILE }}
+          files: ${{ env.ZIP_FILE }}
+          fail_on_unmatched_files: true
