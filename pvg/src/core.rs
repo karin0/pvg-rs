@@ -1,6 +1,7 @@
 use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
+use crate::hook::{DownloadHook, DownloadHookState, EnabledDownloadHookState, NoDownloadHookState};
 use crate::model::{Dimension, Illust, IllustIndex};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
@@ -64,6 +65,7 @@ pub struct Pvg {
     upscaler: Option<Upscaler>,
     update_lock: TokioMutex<()>,
     worker_to_download: TokioMutex<Vec<IllustId>>,
+    download_hook: Option<DownloadHook>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -137,6 +139,18 @@ impl Pvg {
         );
         nav.stats();
 
+        let download_hook = config
+            .download_hook_url
+            .take()
+            .map(|url| -> Result<DownloadHook> {
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    .context("download hook client build failed")?;
+                Ok(DownloadHook::new(url, client))
+            })
+            .transpose()?;
+
         let not_found;
         let worker_to_download;
         let api = if let Some(cache) = parse_file::<LoadedCache>(&config.cache_file)? {
@@ -195,6 +209,7 @@ impl Pvg {
             upscaler,
             update_lock: TokioMutex::default(),
             worker_to_download: TokioMutex::new(worker_to_download),
+            download_hook,
         })
     }
 
@@ -581,12 +596,48 @@ impl Pvg {
         tmp.commit(path, size).await
     }
 
-    async fn download_file(&self, url: String, path: PathBuf) -> (PathBuf, Result<u64>) {
+    async fn download_file(
+        &self,
+        iid: IllustId,
+        url: String,
+        path: PathBuf,
+    ) -> (IllustId, PathBuf, Result<u64>) {
         let r = self.do_download_file(&url, &path).await;
-        (path, r)
+        (iid, path, r)
     }
 
-    async fn make_download_queue(&self) -> Vec<(String, PathBuf)> {
+    async fn call_download_hook(&self, downloaded_iids: Vec<IllustId>) {
+        let Some(hook) = &self.download_hook else {
+            return;
+        };
+        info!(
+            "calling download hook for {} illusts",
+            downloaded_iids.len()
+        );
+
+        if downloaded_iids.is_empty() {
+            return;
+        }
+
+        let payload = {
+            let index = self.index.read().await;
+            match index.get_raw_illust_jsons(&downloaded_iids).await {
+                Ok(payload) => payload,
+                Err(e) => {
+                    error!("download hook: failed to load raw illust batch: {e:?}");
+                    return;
+                }
+            }
+        };
+
+        if payload.is_empty() {
+            return;
+        }
+
+        hook.post_payload(&payload).await;
+    }
+
+    async fn make_download_queue(&self) -> Vec<(IllustId, String, PathBuf)> {
         let index = self.index.read().await;
         let not_found = self.not_found.lock();
         let disk = self.disk_lru.read();
@@ -594,9 +645,13 @@ impl Pvg {
 
         let r = index
             .iter()
-            .flat_map(|illust| illust.pages.iter())
-            .map(|page| (&page.source, page.source.filename()))
-            .filter(|(_, file)| {
+            .flat_map(|illust| {
+                illust
+                    .pages
+                    .iter()
+                    .map(move |page| (illust.data.id, &page.source, page.source.filename()))
+            })
+            .filter(|(_, _, file)| {
                 if !disk.contains(file) {
                     let file: &Path = file.as_ref();
                     if not_found.contains(file) {
@@ -607,7 +662,7 @@ impl Pvg {
                 }
                 false
             })
-            .map(|(src, file)| (src.url(), self.page_path(file)))
+            .map(|(iid, src, file)| (iid, src.url(), self.page_path(file)))
             .collect();
         if cnt_404 > 0 {
             warn!("{cnt_404} pages skipped due to 404");
@@ -615,15 +670,15 @@ impl Pvg {
         r
     }
 
-    async fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(String, PathBuf)> {
+    async fn make_download_queue_from(&self, ids: &[IllustId]) -> Vec<(IllustId, String, PathBuf)> {
         let index = self.index.read().await;
         let not_found = self.not_found.lock();
         let disk = self.disk_lru.read();
         let mut cnt_404 = 0;
         let r = ids
             .iter()
-            .flat_map(|iid| index.map[iid].pages.iter())
-            .filter(|page| {
+            .flat_map(|iid| index.map[iid].pages.iter().map(move |page| (*iid, page)))
+            .filter(|(_, page)| {
                 let file = page.source.filename();
                 if !disk.contains(file) {
                     let file: &Path = file.as_ref();
@@ -635,7 +690,13 @@ impl Pvg {
                 }
                 false
             })
-            .map(|page| (page.source.url(), self.page_path(page.source.filename())))
+            .map(|(iid, page)| {
+                (
+                    iid,
+                    page.source.url(),
+                    self.page_path(page.source.filename()),
+                )
+            })
             .collect();
         if cnt_404 > 0 {
             warn!("{cnt_404} pages skipped due to 404");
@@ -661,7 +722,20 @@ impl Pvg {
         self.do_download_all(q).await
     }
 
-    async fn do_download_all(&self, q: Vec<(String, PathBuf)>) -> Result<(u32, bool)> {
+    async fn do_download_all(&self, q: Vec<(IllustId, String, PathBuf)>) -> Result<(u32, bool)> {
+        if self.download_hook.is_some() {
+            let hook_state = EnabledDownloadHookState::new(q.iter().map(|(iid, _, _)| *iid));
+            self.do_download_all_with(q, hook_state).await
+        } else {
+            self.do_download_all_with(q, NoDownloadHookState).await
+        }
+    }
+
+    async fn do_download_all_with<H: DownloadHookState>(
+        &self,
+        q: Vec<(IllustId, String, PathBuf)>,
+        mut hook_state: H,
+    ) -> Result<(u32, bool)> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
@@ -669,10 +743,11 @@ impl Pvg {
             debug!("no pages to download");
             return Ok((0, false));
         }
+
         debug!("{} pages to download", q.len());
         let mut futs = q
             .into_iter()
-            .map(|(url, path)| self.download_file(url, path))
+            .map(|(iid, url, path)| self.download_file(iid, url, path))
             .collect::<FuturesUnordered<_>>();
         let n = futs.len();
         let mut cnt: u32 = 0;
@@ -680,7 +755,7 @@ impl Pvg {
         let mut tot_size: u64 = 0;
         let mut the_404 = vec![];
         let t0 = Instant::now();
-        while let Some((path, res)) = futs.next().await {
+        while let Some((iid, path, res)) = futs.next().await {
             cnt += 1;
             match res {
                 Ok(size) => {
@@ -695,6 +770,7 @@ impl Pvg {
                         .write()
                         .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
                     tot_size += size;
+                    hook_state.on_downloaded(iid);
                 }
                 Err(e) => {
                     cnt_fail += 1;
@@ -721,6 +797,11 @@ impl Pvg {
                 dirty_404 = true;
             }
         }
+
+        if let Some(downloaded_iids) = hook_state.finish() {
+            self.call_download_hook(downloaded_iids).await;
+        }
+
         if cnt_fail > 0 {
             bail!("failed to download {cnt_fail} pages out from {cnt}");
         }

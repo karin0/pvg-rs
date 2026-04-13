@@ -843,4 +843,13 @@ impl IllustIndex {
     pub fn user_name(&self, illust: &Illust) -> &str {
         self.srv.get_user_name(&illust.data)
     }
+
+    pub async fn get_raw_illust_jsons(&self, iids: &[IllustId]) -> Result<Vec<JsonValue>> {
+        self.store
+            .get_illusts(iids)
+            .await?
+            .into_iter()
+            .map(|(_iid, data)| serde_json::from_slice::<JsonValue>(&data).map_err(Into::into))
+            .collect()
+    }
 }

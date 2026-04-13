@@ -5,6 +5,7 @@ use pixiv::IllustId;
 use sqlx::{
     QueryBuilder, SqlitePool, query, query_file, query_scalar, sqlite::SqliteConnectOptions,
 };
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -96,6 +97,39 @@ impl Store {
             .map(to_json)
             .transpose()?;
         Ok(r)
+    }
+
+    pub async fn get_illusts(&self, iids: &[IllustId]) -> Result<Vec<(IllustId, Vec<u8>)>> {
+        if iids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::new("SELECT iid, data FROM Illust WHERE iid IN (");
+        {
+            let mut separated = query.separated(", ");
+            for iid in iids {
+                separated.push_bind(iid);
+            }
+        }
+        query.push(")");
+
+        let rows = query
+            .build_query_as::<(IllustId, Vec<u8>)>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut map = rows
+            .into_iter()
+            .map(|(iid, blob)| Ok((iid, to_json(blob)?)))
+            .collect::<std::io::Result<HashMap<_, _>>>()?;
+
+        let mut out = Vec::with_capacity(iids.len());
+        for iid in iids {
+            if let Some(data) = map.remove(iid) {
+                out.push((*iid, data));
+            }
+        }
+        Ok(out)
     }
 
     async fn do_upsert<'a, I>(&self, illusts: I) -> Result<()>
