@@ -23,10 +23,9 @@ pub async fn auth(req: RequestBuilder, refresh_token: &str) -> Result<Response> 
         .format(&TIME_FORMAT)
         .unwrap();
     let hash = Md5::new().chain(&local_time).chain(HASH_SECRET).finalize();
-    let hash = format!("{hash:x}");
     let res = req
         .header("X-Client-Time", local_time)
-        .header("X-Client-Hash", hash)
+        .header("X-Client-Hash", hex::encode(hash))
         .form(&[
             ("get_secure_url", "1"),
             ("client_id", CLIENT_ID),
