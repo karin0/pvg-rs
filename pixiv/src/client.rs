@@ -159,10 +159,12 @@ impl AuthedClient {
         Self::make(state)
     }
 
-    pub async fn ensure_authed(&mut self) -> Result<()> {
+    pub async fn ensure_authed(&mut self) -> Result<bool> {
         if self.state.expired() {
             self.state = self.auth(&self.state.refresh_token).await?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
     }
 }
