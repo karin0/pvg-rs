@@ -306,7 +306,7 @@ impl Pvg {
                         // TODO: this is flawed
                         if e.to_string().to_ascii_lowercase().contains("rate limit") {
                             warn!("rate limited, sleeping for 60 secs");
-                            sleep(Duration::from_secs(60)).await;
+                            sleep(Duration::from_mins(1)).await;
                         } else {
                             bail!(e);
                         }
@@ -790,7 +790,7 @@ impl Pvg {
             let mut not_found = self.not_found.lock();
             let old_len = not_found.len();
             let cur_len = the_404.len();
-            not_found.extend(the_404.into_iter());
+            not_found.extend(the_404);
             let new_len = not_found.len();
             if new_len > old_len {
                 warn!("collected {} not_founds (+{})", cur_len, new_len - old_len);

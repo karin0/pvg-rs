@@ -140,7 +140,7 @@ impl Segment {
         let tot = self.memory() >> 20;
 
         let b = self.indices.block_size;
-        let d = if v > 0 { n / v } else { 0 };
+        let d = n.checked_div(v).unwrap_or(0);
         debug!(
             "SA: n={n}={v}*{d}, sa={sa}, fm={fm}, indices={indices}, blocks={blocks} ({b}), total={tot} MiB in {dt:?}"
         );
@@ -686,14 +686,12 @@ impl Segment {
                 // Since `filters.len() == 0`, `ban_filters` must be non-empty.
                 return Box::new(unsafe { self.block_ban_select(ban_filters) });
             }
-            1 => {
-                if ban_filters.is_empty() {
-                    let range = self.indices_range(&filters[0]);
-                    if range.len() >= 3000 {
-                        return Box::new(self.single_block_select(range));
-                    }
-                    return Box::new(self.single_select(range));
+            1 if ban_filters.is_empty() => {
+                let range = self.indices_range(&filters[0]);
+                if range.len() >= 3000 {
+                    return Box::new(self.single_block_select(range));
                 }
+                return Box::new(self.single_select(range));
             }
             _ => {}
         }
