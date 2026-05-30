@@ -1,12 +1,11 @@
 name: Build
 
 on:
-  release:
-    types: [published] # include pre-releases
   push:
     branches: # ignore any tags
       - "**"
   workflow_dispatch:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,7 +41,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           path-type: inherit
-          install: ${{ github.event_name == 'release' && 'zip sqlite' || 'sqlite' }}
+          install: sqlite
 
       - uses: actions/checkout@v4
 
@@ -106,28 +105,7 @@ jobs:
           name: ${{ env.FILE }}
           path: ${{ env.FILE }}
 
-      - uses: robinraju/release-downloader@v1.8
-        if: ${{ github.event_name == 'release' }}
+      - uses: actions/upload-artifact@v4
         with:
-          repository: karin0/pvg-app
-          latest: true
-          fileName: "pvg-app-*.zip"
-          out-file-path: static
-          extract: true
-
-      - name: Package for Release
-        if: ${{ github.event_name == 'release' }}
-        run: |
-          ZIP_FILE=pvg-${GITHUB_REF##*/}-${{ matrix.target }}.zip
-          mkdir dist
-          mv "$BIN_FILE" static dist/
-          cd dist
-          rm static/*.zip
-          zip -r ../"$ZIP_FILE" *
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      - uses: softprops/action-gh-release@v2
-        if: ${{ github.event_name == 'release' }}
-        with:
-          files: ${{ env.ZIP_FILE }}
-          fail_on_unmatched_files: true
+          name: pvg-bin-${{ matrix.target }}
+          path: ${{ env.BIN_FILE }}
