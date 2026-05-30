@@ -5,10 +5,12 @@ members = ["pvg", "pixiv"]
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1
 
 [profile.release-thinlto]
 inherits = "release"
 lto = "thin"
+codegen-units = 16
 
 [profile.debuginfo]
 inherits = "release-thinlto"
