@@ -14,7 +14,8 @@ const CLIENT_SECRET: &str = "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj";
 const HASH_SECRET: &str = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c";
 
 static TIME_FORMAT: LazyLock<Vec<FormatItem>> = LazyLock::new(|| {
-    format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]+00:00").unwrap()
+    format_description::parse_borrowed::<2>("[year]-[month]-[day]T[hour]:[minute]:[second]+00:00")
+        .unwrap()
 });
 
 // Caller must set the user-agent header
