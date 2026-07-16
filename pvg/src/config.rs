@@ -1,14 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::from_str;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 #[derive(Deserialize, Debug)]
 struct ConfigFile {
     username: String,
-    refresh_token: String,
+    refresh_token: Option<String>,
     home: Option<PathBuf>,
     proxy: Option<String>,
     static_dir: Option<PathBuf>,
@@ -43,6 +43,15 @@ pub struct Config {
     pub worker_delay_secs: u32,
     pub safe_mode: bool,
     pub download_hook_url: Option<String>,
+}
+
+/// Runtime env overrides config.json. Compile-time env is the baked-in fallback.
+fn refresh_token(config: Option<String>) -> Result<String> {
+    env::var("PIXIV_REFRESH_TOKEN")
+        .ok()
+        .or(config)
+        .or_else(|| option_env!("PIXIV_REFRESH_TOKEN").map(str::to_owned))
+        .context("no refresh token: set PIXIV_REFRESH_TOKEN or refresh_token in config.json")
 }
 
 fn ensure_dir(dir: &Path) {
@@ -91,7 +100,7 @@ pub fn read_config() -> Result<Config> {
 
     Ok(Config {
         username: config.username,
-        refresh_token: config.refresh_token,
+        refresh_token: refresh_token(config.refresh_token)?,
         proxy: config.proxy,
         pix_dir: at_dir("pix"),
         tmp_dir: ensure_empty_dir(at("tmp")),

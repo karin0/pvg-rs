@@ -46,7 +46,8 @@ Explore, filter, and download artworks from your [pixiv](https://www.pixiv.net/)
 The following options can be specified in `config.json`:
 
 - `username`: Your pixiv username (required)
-- `refresh_token`: Your pixiv refresh token (required)
+- `refresh_token`: Your pixiv refresh token
+  - `PIXIV_REFRESH_TOKEN` environment variable takes precedence. Either must present.
 - `port`: Port to listen on (default: `5678`)
 - `host`: Interface to listen on (default: `"127.0.0.1"`)
   - Specify a LAN address or `"0.0.0.0"` to allow access from network
