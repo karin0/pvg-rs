@@ -1,22 +1,6 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_precision_loss)]
 
-mod config;
-mod core;
-mod disk_lru;
-mod download;
-mod hook;
-mod illust;
-mod model;
-mod store;
-mod upscale;
-mod util;
-
-#[cfg(feature = "search")]
-mod search;
-
-use crate::core::Pvg;
-use crate::util::normalized;
 use actix_cors::Cors;
 use actix_files::NamedFile;
 use actix_web::http::{
@@ -28,6 +12,8 @@ use actix_web::{
 };
 use anyhow::Result;
 use pixiv::{IllustId, PageNum};
+use pvg::core::Pvg;
+use pvg::util::normalized;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::io;

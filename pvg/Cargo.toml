@@ -71,3 +71,7 @@ dhat-heap = ["dep:dhat"]
 sa-bench = ["sa-inverted"]
 sa-packed-bench = ["sa-packed"]
 fm-bench = ["fm-index"]
+
+[lib]
+name = "pvg"
+path = "src/lib.rs"

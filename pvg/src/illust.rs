@@ -69,6 +69,16 @@ pub struct IllustService {
     user_names: StringInterner<Backend>,
 }
 
+impl Default for IllustService {
+    fn default() -> Self {
+        Self {
+            users: HashMap::new(),
+            tags: StringInterner::<Backend>::new(),
+            user_names: StringInterner::<Backend>::new(),
+        }
+    }
+}
+
 impl IllustService {
     pub fn memory(&self) -> usize {
         size_of::<Self>()
@@ -90,14 +100,6 @@ impl IllustService {
 
     pub fn lens(&self) -> (usize, usize, usize) {
         (self.users.len(), self.tags.len(), self.user_names.len())
-    }
-
-    pub fn new() -> Self {
-        Self {
-            users: HashMap::new(),
-            tags: StringInterner::<Backend>::new(),
-            user_names: StringInterner::<Backend>::new(),
-        }
     }
 
     pub fn resolve(&mut self, data: api::Illust, new: bool) -> IllustData {

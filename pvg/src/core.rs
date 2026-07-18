@@ -329,7 +329,7 @@ impl Pvg {
             let index = self.index.read().await;
             index.ensure_stage_clean(0)?;
             index.ensure_stage_clean(1)?;
-            index.len() == 0
+            index.is_empty()
         };
         let limit = if empty {
             self.conf.first_time_pn_limit.unwrap_or(u32::MAX)

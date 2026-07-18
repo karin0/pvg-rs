@@ -337,7 +337,7 @@ impl IllustIndex {
         let size = illusts.iter().map(Vec::len).sum::<usize>();
 
         let mut ids = Vec::with_capacity(illusts.len());
-        let mut srv = IllustService::new();
+        let mut srv = IllustService::default();
         let mut deleted: IllustId = 0;
 
         let map = illusts
@@ -446,6 +446,10 @@ impl IllustIndex {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     pub fn count_pages(&self) -> usize {
@@ -842,6 +846,14 @@ impl IllustIndex {
 
     pub fn user_name(&self, illust: &Illust) -> &str {
         self.srv.get_user_name(&illust.data)
+    }
+
+    #[cfg(feature = "search")]
+    pub fn intros(&self) -> Vec<(IllustId, String)> {
+        self.ids
+            .iter()
+            .map(|&id| (id, self.map[&id].intro(&self.srv)))
+            .collect()
     }
 
     pub async fn get_raw_illust_jsons(&self, iids: &[IllustId]) -> Result<Vec<JsonValue>> {

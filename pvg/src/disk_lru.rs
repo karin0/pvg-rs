@@ -10,6 +10,15 @@ pub struct DiskLru {
     usage: u64,
 }
 
+impl Default for DiskLru {
+    fn default() -> Self {
+        Self {
+            lru: LruCache::unbounded(),
+            usage: 0,
+        }
+    }
+}
+
 impl DiskLru {
     pub async fn load(
         size_hint: usize,
@@ -69,19 +78,12 @@ impl DiskLru {
             None
         };
 
-        let mut lru = Self::new();
+        let mut lru = Self::default();
         for (file, size, _) in entires {
             lru.insert(file, size);
         }
 
         Ok((lru, lru_limit))
-    }
-
-    pub fn new() -> Self {
-        Self {
-            lru: LruCache::unbounded(),
-            usage: 0,
-        }
     }
 
     pub fn insert(&mut self, key: String, size: u64) {
