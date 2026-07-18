@@ -366,25 +366,26 @@ impl Segment {
         self.inner
     }
 
-    fn single_select(&self, range: Range) -> impl Iterator<Item = Key> + '_ {
+    fn single_select(&self, range: Range) -> Vec<Key> {
         self.indices
             .slice(range)
             .sorted_unstable()
             .dedup()
-            .map(move |idx| self.inner.data[idx as usize])
+            .map(|idx| self.inner.data[idx as usize])
+            .collect()
     }
 
-    fn heuristic_select<'a>(
-        &'a self,
+    fn heuristic_select(
+        &self,
         min_idx: Idx,
-        min_indices: impl Iterator<Item = Idx> + 'a,
-        filters: &'a [String],
-        ban_filters: &'a [String],
-    ) -> impl Iterator<Item = Key> + 'a {
+        min_indices: impl Iterator<Item = Idx>,
+        filters: &[String],
+        ban_filters: &[String],
+    ) -> Vec<Key> {
         min_indices
             .sorted_unstable()
             .dedup()
-            .filter_map(move |idx| {
+            .filter_map(|idx| {
                 let (s, key) = self.inner.resolve(idx);
                 let l = s.len();
                 if filters.iter().enumerate().all(|(p, tag)| {
@@ -401,22 +402,23 @@ impl Segment {
                     None
                 }
             })
+            .collect()
     }
 
     #[cfg(feature = "sa-inverted")]
-    fn binary_select<'a>(
-        &'a self,
-        all_ranges: Vec<Range>,
+    fn binary_select(
+        &self,
+        all_ranges: &[Range],
         min_idx: Idx,
-        min_indices: impl Iterator<Item = Idx> + 'a,
-        ban_filters: &'a [String],
-    ) -> impl Iterator<Item = Key> + 'a {
+        min_indices: impl Iterator<Item = Idx>,
+        ban_filters: &[String],
+    ) -> Vec<Key> {
         let ban_ranges = self.query_ranges(ban_filters).collect_vec();
         let indices = &self.indices;
         min_indices
             .sorted_unstable()
             .dedup()
-            .filter_map(move |idx| {
+            .filter_map(|idx| {
                 if all_ranges
                     .iter()
                     .enumerate()
@@ -430,34 +432,35 @@ impl Segment {
                     None
                 }
             })
+            .collect()
     }
 
     #[cfg(feature = "sa-bench")]
-    fn inverted_select<'a>(
-        &'a self,
-        all_ranges: Vec<Range>,
+    fn inverted_select(
+        &self,
+        all_ranges: &[Range],
         min_idx: Idx,
-        min_indices: impl Iterator<Item = Idx> + 'a,
-        ban_filters: &'a [String],
-    ) -> Box<dyn Iterator<Item = Key> + 'a> {
+        min_indices: impl Iterator<Item = Idx>,
+        ban_filters: &[String],
+    ) -> Vec<Key> {
         use std::collections::HashSet;
 
         let mut s = min_indices.collect::<HashSet<Pos>>();
         let mut new = HashSet::new();
 
-        for (p, range) in all_ranges.into_iter().enumerate() {
+        for (p, range) in all_ranges.iter().enumerate() {
             debug!("candidates: {}", s.len());
             STATS.fetch_add(range.len() as u32, Ordering::Relaxed);
             if p as Idx == min_idx {
                 continue;
             }
-            for idx in self.indices.slice(range) {
+            for idx in self.indices.slice(*range) {
                 if s.contains(&idx) {
                     new.insert(idx);
                 }
             }
             if new.is_empty() {
-                return Box::new(std::iter::empty());
+                return Vec::new();
             }
             std::mem::swap(&mut s, &mut new);
             new.clear();
@@ -470,18 +473,14 @@ impl Segment {
                 s.remove(&idx);
             }
         }
-        Box::new(
-            s.into_iter()
-                .sorted_unstable()
-                .map(move |idx| self.inner.data[idx as usize]),
-        )
+        s.into_iter()
+            .sorted_unstable()
+            .map(|idx| self.inner.data[idx as usize])
+            .collect()
     }
 
     #[cfg(feature = "sa-bench")]
-    fn inverted_ban_select<'a>(
-        &'a self,
-        ban_filters: &'a [String],
-    ) -> impl Iterator<Item = Key> + 'a {
+    fn inverted_ban_select(&self, ban_filters: &[String]) -> Vec<Key> {
         use std::collections::HashSet;
 
         let ban_idxs = ban_filters
@@ -493,13 +492,14 @@ impl Segment {
             .data
             .iter()
             .enumerate()
-            .filter_map(move |(idx, &key)| {
+            .filter_map(|(idx, &key)| {
                 if ban_idxs.contains(&(idx as Pos)) {
                     None
                 } else {
                     Some(key)
                 }
             })
+            .collect()
     }
 
     /// Safety: `ranges` must yield at least one item.
@@ -507,7 +507,7 @@ impl Segment {
         &self,
         mut ranges: impl Iterator<Item = Range>,
         ban_filters: &[String],
-    ) -> impl Iterator<Item = Key> {
+    ) -> Vec<Key> {
         let v = self.len();
         // Safety: Caller ensures at least one range exists.
         let first = unsafe { ranges.next().unwrap_unchecked() };
@@ -522,23 +522,17 @@ impl Segment {
             }
             res
         };
-        res.ones()
-            .map(|idx| self.inner.data[idx])
-            .collect_vec()
-            .into_iter()
+        res.ones().map(|idx| self.inner.data[idx]).collect()
     }
 
-    fn single_block_select(&self, range: Range) -> impl Iterator<Item = Key> {
+    fn single_block_select(&self, range: Range) -> Vec<Key> {
         // Safety: `v` == `self.len()`.
         let res = unsafe { self.indices.join_blocks(range, self.len() as Idx) };
-        res.ones()
-            .map(|idx| self.inner.data[idx])
-            .collect_vec()
-            .into_iter()
+        res.ones().map(|idx| self.inner.data[idx]).collect()
     }
 
     /// Safety: `ban_filters` must be non-empty.
-    unsafe fn block_ban_select(&self, ban_filters: &[String]) -> impl Iterator<Item = Key> {
+    unsafe fn block_ban_select(&self, ban_filters: &[String]) -> Vec<Key> {
         let v: usize = self.len();
         // Safety: Caller ensures `ban_filters` is non-empty.
         let (first, rest) = unsafe { ban_filters.split_first().unwrap_unchecked() };
@@ -552,10 +546,7 @@ impl Segment {
             }
             set
         };
-        res.zeroes()
-            .map(|idx| self.inner.data[idx])
-            .collect_vec()
-            .into_iter()
+        res.zeroes().map(|idx| self.inner.data[idx]).collect()
     }
 
     #[cfg(feature = "sa-bench")]
@@ -563,7 +554,7 @@ impl Segment {
         &self,
         ranges: impl Iterator<Item = Range>,
         ban_ranges: impl Iterator<Item = Range>,
-    ) -> impl Iterator<Item = Key> {
+    ) -> Vec<Key> {
         use std::collections::BTreeSet;
         let mut s = BTreeSet::new();
         s.extend(0..self.len() as Pos);
@@ -579,7 +570,9 @@ impl Segment {
             STATS.fetch_add(t.len() as u32, Ordering::Relaxed);
             s = s.difference(&t).copied().collect();
         }
-        s.into_iter().map(|idx| self.inner.data[idx as usize])
+        s.into_iter()
+            .map(|idx| self.inner.data[idx as usize])
+            .collect()
     }
 
     #[inline]
@@ -617,29 +610,23 @@ impl Segment {
 
     #[cfg(feature = "sa-bench")]
     #[inline]
-    fn bench_select<'a>(
-        &'a self,
-        query: Query<'a>,
-        flags: u32,
-    ) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn bench_select(&self, query: Query<'_>, flags: u32) -> Vec<Key> {
         let filters = query.filters;
         let ban_filters = query.ban_filters;
 
         if flags == 0x9 {
             debug!("forced brute select");
-            return Box::new(
-                self.brute_select(self.query_ranges(filters), self.query_ranges(ban_filters)),
-            );
+            return self.brute_select(self.query_ranges(filters), self.query_ranges(ban_filters));
         }
 
         if filters.is_empty() {
             if flags == 0x5 {
                 debug!("forced inverted_ban_select");
-                return Box::new(self.inverted_ban_select(ban_filters));
+                return self.inverted_ban_select(ban_filters);
             }
             // Safety: `Query::new` ensures at least one filter exists.
             // Since `filters.len() == 0`, `ban_filters` must be non-empty.
-            return Box::new(unsafe { self.block_ban_select(ban_filters) });
+            return unsafe { self.block_ban_select(ban_filters) };
         }
 
         let all = self.query_ranges(filters);
@@ -647,36 +634,36 @@ impl Segment {
         if flags == 0x7 {
             debug!("forced block_select");
             // Safety: we have ensured `filters.len() >= 1`.
-            return Box::new(unsafe { self.block_select(all, ban_filters) });
+            return unsafe { self.block_select(all, ban_filters) };
         }
 
         let all = all.collect_vec();
         let Some((min_idx, _, min_indices)) = self.find_min_range(&all) else {
-            return Box::new(std::iter::empty());
+            return Vec::new();
         };
 
         if flags == 0x1 {
             debug!("forced heuristic_select");
-            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
+            return self.heuristic_select(min_idx, min_indices, filters, ban_filters);
         }
 
         if flags == 0x5 {
             debug!("forced inverted_select");
-            return self.inverted_select(all, min_idx, min_indices, ban_filters);
+            return self.inverted_select(&all, min_idx, min_indices, ban_filters);
         }
 
         #[cfg(feature = "sa-inverted")]
         if flags == 0x3 {
             debug!("forced binary_select");
-            return Box::new(self.binary_select(all, min_idx, min_indices, ban_filters));
+            return self.binary_select(&all, min_idx, min_indices, ban_filters);
         }
 
         error!("unrecognized sa-bench flags: {flags}");
-        Box::new(std::iter::empty())
+        Vec::new()
     }
 
     #[inline]
-    fn plan_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn plan_select(&self, query: Query<'_>) -> Vec<Key> {
         let filters = query.filters;
         let ban_filters = query.ban_filters;
 
@@ -684,14 +671,14 @@ impl Segment {
             0 => {
                 // Safety: `Query::new` ensures at least one filter exists.
                 // Since `filters.len() == 0`, `ban_filters` must be non-empty.
-                return Box::new(unsafe { self.block_ban_select(ban_filters) });
+                return unsafe { self.block_ban_select(ban_filters) };
             }
             1 if ban_filters.is_empty() => {
                 let range = self.indices_range(&filters[0]);
                 if range.len() >= 3000 {
-                    return Box::new(self.single_block_select(range));
+                    return self.single_block_select(range);
                 }
-                return Box::new(self.single_select(range));
+                return self.single_select(range);
             }
             _ => {}
         }
@@ -699,34 +686,34 @@ impl Segment {
         let all = self.query_ranges(filters);
         let all = all.collect_vec();
         let Some((min_idx, min_len, min_indices)) = self.find_min_range(&all) else {
-            return Box::new(std::iter::empty());
+            return Vec::new();
         };
 
         if min_len <= 150 {
             #[cfg(feature = "sa-inverted")]
-            return {
+            {
                 let pattern_len: usize = filters
                     .iter()
                     .chain(ban_filters.iter())
                     .map(String::len)
                     .sum();
-                if pattern_len >= 80 {
-                    Box::new(self.binary_select(all, min_idx, min_indices, ban_filters))
+                return if pattern_len >= 80 {
+                    self.binary_select(&all, min_idx, min_indices, ban_filters)
                 } else {
-                    Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters))
-                }
-            };
+                    self.heuristic_select(min_idx, min_indices, filters, ban_filters)
+                };
+            }
             #[cfg(not(feature = "sa-inverted"))]
-            return Box::new(self.heuristic_select(min_idx, min_indices, filters, ban_filters));
+            return self.heuristic_select(min_idx, min_indices, filters, ban_filters);
         }
 
         // Safety: we have ensured `filters.len() >= 1`.
-        Box::new(unsafe { self.block_select(all.into_iter(), ban_filters) })
+        unsafe { self.block_select(all.into_iter(), ban_filters) }
     }
 
     #[cfg(feature = "sa-bench")]
     #[inline]
-    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn do_select(&self, query: Query<'_>) -> Vec<Key> {
         let flags = FLAGS.load(Ordering::Relaxed) & 0xf;
         if flags != 0 {
             self.bench_select(query, flags)
@@ -737,14 +724,14 @@ impl Segment {
 
     #[cfg(not(feature = "sa-bench"))]
     #[inline]
-    fn do_select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    fn do_select(&self, query: Query<'_>) -> Vec<Key> {
         self.plan_select(query)
     }
 
     #[cfg(feature = "fm-bench")]
-    pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    pub fn select(&self, query: Query<'_>) -> Vec<Key> {
         if self.size() == 0 {
-            return Box::new(std::iter::empty());
+            return Vec::new();
         }
         PERF_SA.store(0, Ordering::Relaxed);
         PERF_FM.store(0, Ordering::Relaxed);
@@ -757,9 +744,9 @@ impl Segment {
     }
 
     #[cfg(not(feature = "fm-bench"))]
-    pub fn select<'a>(&'a self, query: Query<'a>) -> Box<dyn Iterator<Item = Key> + 'a> {
+    pub fn select(&self, query: Query<'_>) -> Vec<Key> {
         if self.size() == 0 {
-            return Box::new(std::iter::empty());
+            return Vec::new();
         }
         self.do_select(query)
     }

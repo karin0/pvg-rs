@@ -83,20 +83,24 @@ impl Index {
         sz
     }
 
-    fn finalize_select<I: Iterator<Item = Key>>(&self, iter: I) -> Vec<Key> {
-        if self.dedup {
-            let mut seen = HashSet::new();
-            iter.filter(|k| seen.insert(*k)).collect_vec()
-        } else {
-            iter.collect_vec()
-        }
+    fn dedup_keys(keys: Vec<Key>) -> Vec<Key> {
+        let mut seen = HashSet::with_capacity(keys.len());
+        keys.into_iter().filter(|k| seen.insert(*k)).collect()
     }
 
     pub fn select(&self, query: Query) -> Vec<Key> {
         if let Some(minor) = &self.minor {
-            self.finalize_select(self.major.select(query).chain(minor.select(query)))
+            let mut keys = self.major.select(query);
+            keys.extend(minor.select(query));
+            if self.dedup {
+                Self::dedup_keys(keys)
+            } else {
+                keys
+            }
+        } else if self.dedup {
+            Self::dedup_keys(self.major.select(query))
         } else {
-            self.finalize_select(self.major.select(query))
+            self.major.select(query)
         }
     }
 
