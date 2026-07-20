@@ -139,15 +139,16 @@ impl Pvg {
         );
         nav.stats();
 
-        let download_hook = config
-            .download_hook_url
-            .take()
-            .map(|url| -> Result<DownloadHook> {
+        let download_hook = (!config.download_hook_urls.is_empty())
+            .then(|| -> Result<DownloadHook> {
                 let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(10))
                     .build()
                     .context("download hook client build failed")?;
-                Ok(DownloadHook::new(url, client))
+                Ok(DownloadHook::new(
+                    std::mem::take(&mut config.download_hook_urls),
+                    client,
+                ))
             })
             .transpose()?;
 
