@@ -60,12 +60,20 @@ impl Occ {
     }
 
     pub fn get(&self, bwt: &BWTSlice, r: usize, a: u8) -> usize {
+        // Symbols outside this segment's alphabet have no occ row or an empty
+        // one, so count zero. Hit by cross-segment queries (byte in `major`,
+        // absent from the incremental `minor`).
+        let occ_a = match self.occ.get(a as usize) {
+            Some(occ_a) if !occ_a.is_empty() => occ_a,
+            _ => return 0,
+        };
+
         let lo_checkpoint = r / OCC_K as usize;
-        let lo_occ = self.occ[a as usize][lo_checkpoint] as usize;
+        let lo_occ = occ_a[lo_checkpoint] as usize;
 
         if OCC_K > 64 {
             let hi_checkpoint = lo_checkpoint + 1;
-            if let Some(&hi_occ) = self.occ[a as usize].get(hi_checkpoint) {
+            if let Some(&hi_occ) = occ_a.get(hi_checkpoint) {
                 if lo_occ == hi_occ as usize {
                     return lo_occ;
                 }
@@ -94,7 +102,13 @@ impl FMIndexable for FMIndex {
     }
 
     fn less(&self, a: u8) -> usize {
-        self.less[a as usize] as usize
+        // A byte beyond `max_symbol` exceeds every symbol, so `less` is the
+        // total (final entry); with `Occ::get` zero, the search interval stays
+        // empty.
+        self.less
+            .get(a as usize)
+            .copied()
+            .unwrap_or_else(|| *self.less.last().unwrap()) as usize
     }
 
     fn bwt(&self) -> &BWT {
