@@ -25,7 +25,7 @@ parking_lot = "0.12"
 actix-cors = "0.7"
 ctrlc = { version = "3", features = ["termination"] }
 futures = "0"
-itertools = "0.14"
+itertools = "0.15"
 lru = "0.18"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "macros"] }
 unicode-normalization = "0.1"
@@ -42,9 +42,9 @@ rayon = { version = "1", optional = true }
 similar = { version = "3", optional = true }
 fixedbitset = { version = "0.5", optional = true }
 integer-sqrt = { version = "0.1", optional = true }
-bio = { version = "3", optional = true }
+bio = { version = "4", optional = true }
 bytecount = { version = "0.6", optional = true }
-packedvec = { version = "1", optional = true }
+packedvec = { version = "2", optional = true }
 nix = { version = "0.31", features = ["fs"], optional = true }
 dhat = { version = "0.3", optional = true }
 
@@ -52,8 +52,8 @@ pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
 pixiv = { path = "../pixiv" }
 
 [build-dependencies]
-vergen = { version = "9", features = ["build", "cargo", "rustc", "si"] }
-vergen-gitcl = { version = "9", features = ["build"] }
+vergen = { version = "10", features = ["build", "cargo", "rustc", "si"] }
+vergen-gitcl = { version = "10", features = ["build"] }
 
 [features]
 default = ["sa-packed", "fm-index"]
