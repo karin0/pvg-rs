@@ -20,6 +20,7 @@ struct ConfigFile {
     disable_select: Option<bool>,
     worker_delay_secs: Option<u32>,
     safe_mode: Option<bool>,
+    bookmark: Option<bool>,
     #[serde(default)]
     download_hook_urls: Vec<String>,
 }
@@ -43,6 +44,8 @@ pub struct Config {
     pub disable_select: bool,
     pub worker_delay_secs: u32,
     pub safe_mode: bool,
+    /// Serves `POST /bookmark`, the one route that writes to the pixiv account.
+    pub bookmark: bool,
     pub download_hook_urls: Vec<String>,
 }
 
@@ -117,6 +120,7 @@ pub fn read_config() -> Result<Config> {
         disable_select: config.disable_select.unwrap_or(false),
         worker_delay_secs: config.worker_delay_secs.unwrap_or(0),
         safe_mode: config.safe_mode.unwrap_or(false),
+        bookmark: config.bookmark.unwrap_or(false),
         download_hook_urls: config.download_hook_urls,
     })
 }

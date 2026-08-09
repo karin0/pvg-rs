@@ -43,6 +43,7 @@ pub struct ApiEndpoint {
     pub auth: SimpleEndpoint,
     pub user_bookmarks_illust: SimpleEndpoint,
     pub illust_follow: SimpleEndpoint,
+    pub illust_bookmark_add: SimpleEndpoint,
 }
 
 impl ApiEndpoint {
@@ -56,6 +57,7 @@ impl ApiEndpoint {
             auth: oauth.post("auth/token")?,
             user_bookmarks_illust: appv1.get("user/bookmarks/illust")?,
             illust_follow: appv2.get("illust/follow")?,
+            illust_bookmark_add: appv2.post("illust/bookmark/add")?,
         })
     }
 

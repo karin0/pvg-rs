@@ -408,6 +408,22 @@ impl Pvg {
         Ok(ids)
     }
 
+    pub async fn bookmark(&self, iid: IllustId) -> Result<()> {
+        let known = self.index.read().await.map.contains_key(&iid);
+        if known {
+            info!("bookmark {iid}: indexed");
+            return Ok(());
+        }
+        let api = self.auth().await?;
+        if let Err(e) = api.illust_bookmark_add(iid, Restrict::Public).await {
+            let e = anyhow::Error::from(e);
+            error!("bookmark {iid}: {e:#}");
+            return Err(e);
+        }
+        info!("bookmarked {iid}");
+        Ok(())
+    }
+
     pub async fn get_source(&self, iid: IllustId, pn: PageNum) -> Option<(String, PathBuf)> {
         let index = self.index.read().await;
         let src = &index.get_page(iid, pn)?.source;

@@ -4,7 +4,7 @@ pub enum Error {
     Request(#[from] reqwest::Error),
     #[error("json deserialization failed")]
     Json(#[from] serde_json::Error),
-    #[error("api error")]
+    #[error("pixiv api {0}: {1}")]
     Pixiv(u16, String),
     #[error("url parse failed")]
     Url(#[from] url::ParseError),

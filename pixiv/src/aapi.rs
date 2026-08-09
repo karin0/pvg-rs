@@ -1,22 +1,58 @@
 use crate::client::{ApiState, Client};
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
+use crate::model::IllustId;
 use log::{debug, error};
-use reqwest::{Method, RequestBuilder};
+use reqwest::{Method, RequestBuilder, Response};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use strum_macros::IntoStaticStr;
 use url::Url;
 
-async fn finalize<T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorMessages,
+}
+
+#[derive(Deserialize)]
+struct ErrorMessages {
+    #[serde(default)]
+    user_message: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// pixiv states a failure in one of three message slots and leaves the rest
+/// empty, escaping any non-ASCII text.
+fn describe(body: String) -> String {
+    match serde_json::from_str::<ErrorEnvelope>(&body) {
+        Ok(env) => {
+            let e = env.error;
+            [e.user_message, e.message, e.reason]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or(body)
+        }
+        Err(_) => body,
+    }
+}
+
+async fn send(req: RequestBuilder) -> Result<Response> {
     let r = req.send().await?;
     let st = r.status();
     if st.is_success() || st.is_redirection() {
         debug!("{} from {}", st, r.url());
-        Ok(r.json().await?)
+        Ok(r)
     } else {
         error!("{} from {}", st, r.url());
-        Err(Error::Pixiv(st.as_u16(), r.text().await?))
+        Err(Error::Pixiv(st.as_u16(), describe(r.text().await?)))
     }
+}
+
+async fn finalize<T: DeserializeOwned>(req: RequestBuilder) -> Result<T> {
+    Ok(send(req).await?.json().await?)
 }
 
 #[derive(Copy, Clone, Debug, IntoStaticStr)]
@@ -57,5 +93,15 @@ impl<S: ApiState> Client<S> {
                 .query(&[("restrict", Into::<&str>::into(restrict))]),
         )
         .await
+    }
+
+    pub async fn illust_bookmark_add(&self, id: IllustId, restrict: Restrict) -> Result<()> {
+        let id = id.to_string();
+        send(
+            self.app(&self.api.illust_bookmark_add)
+                .form(&[("illust_id", id.as_str()), ("restrict", restrict.into())]),
+        )
+        .await?;
+        Ok(())
     }
 }

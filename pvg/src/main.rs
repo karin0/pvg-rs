@@ -76,7 +76,8 @@ async fn select(app: web::Data<Pvg>, payload: web::Json<SelectPayload>) -> impl 
 fn mapper<T: Into<anyhow::Error>>(e: T) -> io::Error {
     let e = e.into();
     error!("mapper: {e:?}");
-    io::Error::other(e.to_string())
+    // `{:#}` joins the whole chain, so the client sees the innermost cause.
+    io::Error::other(format!("{e:#}"))
 }
 
 #[get("/action/qupd")]
@@ -95,6 +96,20 @@ async fn download_all(app: web::Data<Pvg>) -> impl Responder {
 #[get("/action/measure")]
 async fn measure_all(app: web::Data<Pvg>) -> io::Result<&'static str> {
     app.measure_all().await.map_err(mapper)?;
+    Ok("ok")
+}
+
+#[derive(Deserialize)]
+struct BookmarkPayload {
+    id: IllustId,
+}
+
+#[post("/bookmark")]
+async fn bookmark(
+    app: web::Data<Pvg>,
+    payload: web::Json<BookmarkPayload>,
+) -> io::Result<&'static str> {
+    app.bookmark(payload.id).await.map_err(mapper)?;
     Ok("ok")
 }
 
@@ -241,6 +256,7 @@ async fn main() -> Result<()> {
 
     let static_dir = pvg.conf.static_dir.clone();
     let addr = pvg.conf.addr;
+    let bookmark_enabled = pvg.conf.bookmark;
     let server = HttpServer::new(move || {
         let app = App::new()
             .wrap(Cors::permissive())
@@ -258,11 +274,12 @@ async fn main() -> Result<()> {
             .service(qudo)
             .service(get_env);
         #[cfg(feature = "image")]
-        return app.service(measure_all);
-
-        #[cfg(not(feature = "image"))]
-        #[allow(clippy::let_and_return)]
-        app
+        let app = app.service(measure_all);
+        if bookmark_enabled {
+            app.service(bookmark)
+        } else {
+            app
+        }
     })
     .bind(addr)?
     .disable_signals()
