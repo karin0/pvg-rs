@@ -1,20 +1,17 @@
 use std::error::Error;
-use vergen::{BuildBuilder, CargoBuilder, Emitter, RustcBuilder, SysinfoBuilder};
-use vergen_gitcl::GitclBuilder;
+use vergen::{Build, Cargo, Emitter, Rustc, Sysinfo};
+use vergen_gitcl::Gitcl;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let gitcl = GitclBuilder::default().describe(true, true, None).build()?;
-    let build = BuildBuilder::default().build_timestamp(true).build()?;
-    let cargo = CargoBuilder::default()
+    let gitcl = Gitcl::builder().describe(true, true, None).build();
+    let build = Build::builder().build_timestamp(true).build();
+    let cargo = Cargo::builder()
         .features(true)
         .opt_level(true)
         .debug(true)
-        .build()?;
-    let rustc = RustcBuilder::default()
-        .semver(true)
-        .host_triple(true)
-        .build()?;
-    let si = SysinfoBuilder::default().os_version(true).build()?;
+        .build();
+    let rustc = Rustc::builder().semver(true).host_triple(true).build();
+    let si = Sysinfo::builder().os_version(true).build();
 
     Emitter::default()
         .add_instructions(&gitcl)?
