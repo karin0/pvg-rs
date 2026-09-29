@@ -56,6 +56,8 @@ The following options can be specified in `config.json`:
 - `safe_mode`: Turn on to show only illustions with a safe sanity_level (default: `false`)
 - `home`: Path to the directory to store data and index (default: `.`)
   - Downloaded artworks are saved in `<home>/pix`
+- `static_dir`: Web UI bundle served under `/s` (default: `<home>/static`)
+- `cache_limit`: Size cap of `<home>/pix` in bytes; the least recently used files are evicted beyond it
 
 ## Build
 
