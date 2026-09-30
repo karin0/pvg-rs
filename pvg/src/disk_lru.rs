@@ -103,6 +103,12 @@ impl DiskLru {
         }
     }
 
+    pub fn remove(&mut self, key: &str) {
+        if let Some(size) = self.lru.pop(key) {
+            self.usage -= size;
+        }
+    }
+
     pub fn promote(&mut self, key: &str) {
         self.lru.promote(key);
     }

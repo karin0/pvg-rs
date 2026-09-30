@@ -140,6 +140,7 @@ struct StagedItem {
     id: IllustId,
     json: Vec<u8>,
     status: StagedStatus,
+    superseded: Vec<Source>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -313,6 +314,17 @@ pub type DimCache = Vec<(IllustId, Vec<Dimension>)>;
 #[derive(Deserialize)]
 struct OnlyId {
     id: IllustId,
+}
+
+/// Old sources of the pages whose re-upload kept the URL basename, which is
+/// the only name a page file has on disk.
+fn superseded_pages(old: &Illust, new: &Illust) -> Vec<Source> {
+    old.pages
+        .iter()
+        .zip(&new.pages)
+        .filter(|(o, n)| o.source.url != n.source.url && o.source.filename() == n.source.filename())
+        .map(|(o, _)| o.source.clone())
+        .collect()
 }
 
 impl IllustIndex {
@@ -538,10 +550,12 @@ impl IllustIndex {
         let id = illust.data.id;
         let stage = &mut self.stages[stage_id];
         let mut status = StagedStatus::New;
+        let mut superseded = Vec::new();
         if illust.data.visible {
             match self.map.entry(illust.data.id) {
                 Entry::Occupied(mut ent) => {
                     let old = ent.get();
+                    superseded = superseded_pages(old, &illust);
                     if !stage.cache.is_empty() {
                         if stage.cache.contains(&json) {
                             // The exactly same data already exists in the map.
@@ -609,7 +623,12 @@ impl IllustIndex {
             let r = self.map.insert(id, illust);
             assert!(r.is_none());
         }
-        stage.todo.push(StagedItem { id, json, status });
+        stage.todo.push(StagedItem {
+            id,
+            json,
+            status,
+            superseded,
+        });
         Ok(status == StagedStatus::New)
     }
 
@@ -624,14 +643,15 @@ impl IllustIndex {
     }
 
     // The staged illusts are already applied to `self.map``, we commit them to
-    // `self.ids` and the store here.
-    pub async fn commit(&mut self, stage_id: usize) -> usize {
+    // `self.ids` and the store here. Returns the number of committed illusts
+    // and the superseded sources among them.
+    pub async fn commit(&mut self, stage_id: usize) -> (usize, Vec<Source>) {
         let the_stage = &mut self.stages[stage_id];
         let stage = std::mem::take(&mut the_stage.todo);
         let cnt = stage.len();
 
         if cnt == 0 {
-            return 0;
+            return (0, Vec::new());
         }
 
         #[cfg(feature = "search")]
@@ -693,10 +713,17 @@ impl IllustIndex {
                 self.sa = SearchIndex::default();
             }
 
-            return 0;
+            return (0, Vec::new());
         }
 
-        the_stage.cache = stage.into_iter().map(|item| item.json).collect();
+        let mut superseded = Vec::new();
+        the_stage.cache = stage
+            .into_iter()
+            .map(|item| {
+                superseded.extend(item.superseded);
+                item.json
+            })
+            .collect();
         self.ids.extend(new_ids);
 
         if !self.disable_select {
@@ -722,7 +749,7 @@ impl IllustIndex {
         // We return the number of all affected illusts (new + updated) here.
         // This ensures when new pages are added to an existing illust (likely
         // on the first page fetch), the caller still invokes a download task.
-        cnt
+        (cnt, superseded)
     }
 
     pub fn rollback(&mut self, stage_id: usize) -> usize {
@@ -863,5 +890,50 @@ impl IllustIndex {
             .into_iter()
             .map(|(_iid, data)| serde_json::from_slice::<JsonValue>(&data).map_err(Into::into))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn illust(srv: &mut IllustService, urls: &[&str]) -> Illust {
+        let raw = serde_json::json!({
+            "id": 12_345_678, "title": "t", "width": 1, "height": 1,
+            "user": {"id": 1, "name": "u", "account": "u"},
+            "meta_single_page": {}, "page_count": urls.len(),
+            "meta_pages": urls.iter().map(|u| serde_json::json!({"image_urls": {"original": u}})).collect_vec(),
+            "tags": [], "sanity_level": 2, "x_restrict": 0, "visible": true,
+            "create_date": "", "caption": "", "is_bookmarked": true, "type": "illust",
+        });
+        Illust::from_raw(serde_json::from_value(raw).unwrap(), srv, true).unwrap()
+    }
+
+    const IMG: &str = "https://i.pximg.net/img-original/img/2024/01/02/03";
+
+    #[test]
+    fn a_re_upload_under_the_same_basename_supersedes_the_old_page() {
+        let mut srv = IllustService::default();
+        let old = illust(
+            &mut srv,
+            &[
+                &format!("{IMG}/04/05/12345678_p0.png"),
+                &format!("{IMG}/04/05/12345678_p1.png"),
+            ],
+        );
+        let new = illust(
+            &mut srv,
+            &[
+                &format!("{IMG}/05/06/12345678_p0.png"),
+                &format!("{IMG}/05/06/12345678-abc_p1.png"),
+            ],
+        );
+        let urls = superseded_pages(&old, &new)
+            .iter()
+            .map(Source::url)
+            .collect_vec();
+        // p1 took a new basename, so its old file stays as an orphan.
+        assert_eq!(urls, [format!("{IMG}/04/05/12345678_p0.png")]);
+        assert!(superseded_pages(&new, &new).is_empty());
     }
 }

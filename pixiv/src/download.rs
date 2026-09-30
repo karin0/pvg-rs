@@ -51,3 +51,33 @@ impl DownloadClient {
         }
     }
 }
+
+/// The name an original keeps once an artist's re-upload reuses its URL
+/// basename: the digits of the URL before the basename, which pixiv's date
+/// path changes with each upload, go before the extension. So
+/// `.../img/2024/01/02/03/04/05/12345678_p0.png` keeps
+/// `12345678_p0@20240102030405.png`.
+#[must_use]
+pub fn versioned_name(url: &str) -> String {
+    let (dir, name) = url.rsplit_once('/').unwrap_or(("", url));
+    let digits: String = dir.chars().filter(char::is_ascii_digit).collect();
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}@{digits}.{ext}"),
+        None => format!("{name}@{digits}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::versioned_name;
+
+    #[test]
+    fn keeps_the_digits_before_the_basename() {
+        assert_eq!(
+            versioned_name(
+                "https://i.pximg.net/img-original/img/2024/01/02/03/04/05/12345678_p0.png"
+            ),
+            "12345678_p0@20240102030405.png"
+        );
+    }
+}

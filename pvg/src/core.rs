@@ -2,7 +2,7 @@ use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
 use crate::hook::{DownloadHook, DownloadHookState, EnabledDownloadHookState, NoDownloadHookState};
-use crate::model::{Dimension, Illust, IllustIndex};
+use crate::model::{Dimension, Illust, IllustIndex, Source};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
@@ -360,7 +360,7 @@ impl Pvg {
         stage: usize,
         name: &'static str,
         res: &mut Vec<IllustId>,
-    ) {
+    ) -> Vec<Source> {
         {
             let it = index.peek(stage);
             let n = it.len();
@@ -381,30 +381,37 @@ impl Pvg {
                 }
             }
         }
-        index.commit(stage).await;
+        index.commit(stage).await.1
     }
 
     pub async fn quick_update(&self) -> Result<(usize, usize)> {
-        let (n_pri, n_pub) = {
+        let (n_pri, n_pub, superseded) = {
             let mut index = self.quick_update_atomic().await?;
             // commit private first
-            let n_pri = index.commit(0).await;
-            let n_pub = index.commit(1).await;
-            (n_pri, n_pub)
+            let (n_pri, mut superseded) = index.commit(0).await;
+            let (n_pub, public) = index.commit(1).await;
+            superseded.extend(public);
+            (n_pri, n_pub, superseded)
         };
+        self.supersede(superseded).await;
         info!("quick updated {n_pub} + {n_pri} illusts");
         Ok((n_pri, n_pub))
     }
 
     async fn quick_update_worker(&self) -> Result<Vec<IllustId>> {
         let mut ids = Vec::new();
-        {
+        let superseded = {
             let mut index = self.quick_update_atomic().await?;
-            self.commit_stage_worker(&mut index, 0, "private", &mut ids)
+            let mut superseded = self
+                .commit_stage_worker(&mut index, 0, "private", &mut ids)
                 .await;
-            self.commit_stage_worker(&mut index, 1, "public", &mut ids)
-                .await;
-        }
+            superseded.extend(
+                self.commit_stage_worker(&mut index, 1, "public", &mut ids)
+                    .await,
+            );
+            superseded
+        };
+        self.supersede(superseded).await;
         Ok(ids)
     }
 
@@ -477,6 +484,25 @@ impl Pvg {
         let dst = self.orphan_path(file);
         if let Err(e) = fs::rename(&path, &dst).await {
             error!("failed to orphan {}: {e}", path.display());
+        }
+    }
+
+    /// Moves the file of each superseded source into `orphan_dir` under its
+    /// versioned name, leaving the plain name for the new version to download
+    /// into. A move that fails keeps the old file as the page's copy.
+    async fn supersede(&self, sources: Vec<Source>) {
+        for src in sources {
+            let file = src.filename();
+            let versioned = pixiv::download::versioned_name(&src.url());
+            match fs::rename(self.page_path(file), self.orphan_path(&versioned)).await {
+                Ok(()) => info!("superseded {file} as {versioned}"),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => {
+                    error!("failed to supersede {file}: {e}");
+                    continue;
+                }
+            }
+            self.disk_lru.write().remove(file);
         }
     }
 
