@@ -38,6 +38,9 @@ async fn image(
             Ok(f) => Ok(Either::Left(f)),
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
+                    if app.adopt_page(iid, &src, &path).await {
+                        return Ok(Either::Left(NamedFile::open_async(&path).await?));
+                    }
                     let resp = app.download(&src, path).await.map_err(mapper)?;
                     Ok(Either::Right(
                         HttpResponseBuilder::new(StatusCode::OK).streaming(resp),

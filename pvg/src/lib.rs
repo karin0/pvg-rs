@@ -14,6 +14,7 @@ pub mod download;
 pub mod hook;
 pub mod illust;
 pub mod model;
+pub mod peer;
 pub mod store;
 pub mod upscale;
 pub mod util;

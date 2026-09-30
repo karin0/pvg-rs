@@ -3,6 +3,7 @@ use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
 use crate::hook::{DownloadHook, DownloadHookState, EnabledDownloadHookState, NoDownloadHookState};
 use crate::model::{Dimension, Illust, IllustIndex, Superseded};
+use crate::peer::Peer;
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
@@ -33,6 +34,11 @@ use crate::model::Dimensions;
 use image::GenericImageView;
 #[cfg(feature = "image")]
 use rayon::prelude::*;
+
+enum Origin {
+    Peer,
+    Pixiv,
+}
 
 #[derive(Deserialize, Default)]
 struct LoadedCache {
@@ -66,6 +72,7 @@ pub struct Pvg {
     update_lock: TokioMutex<()>,
     worker_to_download: TokioMutex<Vec<IllustId>>,
     download_hook: Option<DownloadHook>,
+    peer: Option<Peer>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -152,6 +159,11 @@ impl Pvg {
             })
             .transpose()?;
 
+        let peer = match config.peer.take() {
+            Some(conf) => Some(Peer::open(conf).await?),
+            None => None,
+        };
+
         let not_found;
         let worker_to_download;
         let api = if let Some(cache) = parse_file::<LoadedCache>(&config.cache_file)? {
@@ -211,6 +223,7 @@ impl Pvg {
             update_lock: TokioMutex::default(),
             worker_to_download: TokioMutex::new(worker_to_download),
             download_hook,
+            peer,
         })
     }
 
@@ -493,7 +506,7 @@ impl Pvg {
     /// changes, so an identical copy is dropped. A failed fetch moves the old
     /// file aside, and the download queue fetches the page later.
     async fn supersede(&self, pages: Vec<Superseded>) {
-        for Superseded { old, new } in pages {
+        for Superseded { iid, old, new } in pages {
             let file = old.filename();
             let path = self.page_path(file);
             if !fs::try_exists(&path).await.unwrap_or(false) {
@@ -503,8 +516,8 @@ impl Pvg {
             let url = new.url();
             let fresh = self.orphan_path(versioned_name(&url));
             let stale = self.orphan_path(versioned_name(&old.url()));
-            let r = match self.do_download_file(&url, &fresh).await {
-                Ok(size) => self.swap_in(file, &fresh, &stale, size).await,
+            let r = match self.do_download_file(iid, &url, &fresh).await {
+                Ok((size, _)) => self.swap_in(file, &fresh, &stale, size).await,
                 Err(e) => {
                     error!("{file}: fetching the re-upload failed, moving it aside: {e}");
                     self.move_aside(file, &stale).await
@@ -646,7 +659,48 @@ impl Pvg {
         Ok(())
     }
 
-    async fn do_download_file(&self, url: &str, path: &Path) -> Result<u64> {
+    /// Copies the page into `path` from the peer archive when it holds this
+    /// version. Any failure leaves the page to the download.
+    async fn adopt(&self, iid: IllustId, url: &str, path: &Path) -> Option<u64> {
+        let peer = self.peer.as_ref()?;
+        let r = async {
+            let Some(src) = peer.locate(iid, url).await? else {
+                return Ok(None);
+            };
+            let mut tmp = self.open_temp(path).await?;
+            if let Err(e) = tmp.copy_from(&src).await {
+                tmp.rollback().await;
+                return Err(e.into());
+            }
+            anyhow::Ok(Some(tmp.commit(path, None).await?))
+        }
+        .await;
+        r.unwrap_or_else(|e| {
+            warn!("{}: copying from the peer failed: {e:#}", path.display());
+            None
+        })
+    }
+
+    /// `adopt` for a page requested before any download pass fetched it.
+    pub async fn adopt_page(&self, iid: IllustId, url: &str, path: &Path) -> bool {
+        let Some(size) = self.adopt(iid, url, path).await else {
+            return false;
+        };
+        let file = path.file_name().unwrap().to_str().unwrap();
+        self.disk_lru.write().insert(file.to_owned(), size);
+        self.disk_evict_all().await;
+        true
+    }
+
+    async fn do_download_file(
+        &self,
+        iid: IllustId,
+        url: &str,
+        path: &Path,
+    ) -> Result<(u64, Origin)> {
+        if let Some(size) = self.adopt(iid, url, path).await {
+            return Ok((size, Origin::Peer));
+        }
         let perm = DOWNLOAD_SEMA.acquire().await?;
         let mut tmp = self.open_temp(path).await?;
         let r = match self.pixiv.download(url).await {
@@ -666,7 +720,7 @@ impl Pvg {
             tmp.rollback().await;
             return Err(e);
         }
-        tmp.commit(path, size).await
+        Ok((tmp.commit(path, size).await?, Origin::Pixiv))
     }
 
     async fn download_file(
@@ -674,8 +728,8 @@ impl Pvg {
         iid: IllustId,
         url: String,
         path: PathBuf,
-    ) -> (IllustId, PathBuf, Result<u64>) {
-        let r = self.do_download_file(&url, &path).await;
+    ) -> (IllustId, PathBuf, Result<(u64, Origin)>) {
+        let r = self.do_download_file(iid, &url, &path).await;
         (iid, path, r)
     }
 
@@ -826,23 +880,27 @@ impl Pvg {
         let mut cnt: u32 = 0;
         let mut cnt_fail: u32 = 0;
         let mut tot_size: u64 = 0;
+        let mut cnt_copied: u32 = 0;
         let mut the_404 = vec![];
         let t0 = Instant::now();
         while let Some((iid, path, res)) = futs.next().await {
             cnt += 1;
             match res {
-                Ok(size) => {
-                    info!(
-                        "{}/{}: downloaded {} ({} KiB)",
-                        cnt,
-                        n,
-                        path.display(),
-                        size >> 10
-                    );
+                Ok((size, origin)) => {
+                    let verb = match origin {
+                        Origin::Peer => {
+                            cnt_copied += 1;
+                            "copied"
+                        }
+                        Origin::Pixiv => {
+                            tot_size += size;
+                            "downloaded"
+                        }
+                    };
+                    info!("{cnt}/{n}: {verb} {} ({} KiB)", path.display(), size >> 10);
                     self.disk_lru
                         .write()
                         .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
-                    tot_size += size;
                     hook_state.on_downloaded(iid);
                 }
                 Err(e) => {
@@ -879,7 +937,8 @@ impl Pvg {
             bail!("failed to download {cnt_fail} pages out from {cnt}");
         }
         info!(
-            "downloaded {cnt} pages ({:.3} MiB in {dt:.3?}, {:.3} KiB/s)",
+            "downloaded {} pages ({:.3} MiB in {dt:.3?}, {:.3} KiB/s), copied {cnt_copied} from the peer",
+            cnt - cnt_copied,
             tot_size as f64 / 1024.0 / 1024.0,
             tot_size as f64 / (dt.as_secs_f64() * 1024.0),
         );
