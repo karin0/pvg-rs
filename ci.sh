@@ -19,3 +19,5 @@ else
 fi
 
 clippy --features fm-bench,sa-bench,sa-packed-bench,diff,dhat-heap,$ext
+
+cargo test --workspace
