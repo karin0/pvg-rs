@@ -140,7 +140,7 @@ struct StagedItem {
     id: IllustId,
     json: Vec<u8>,
     status: StagedStatus,
-    superseded: Vec<Source>,
+    superseded: Vec<Superseded>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -316,14 +316,23 @@ struct OnlyId {
     id: IllustId,
 }
 
-/// Old sources of the pages whose re-upload kept the URL basename, which is
-/// the only name a page file has on disk.
-fn superseded_pages(old: &Illust, new: &Illust) -> Vec<Source> {
+/// A page re-uploaded under the same URL basename, which is the only name a
+/// page file has on disk.
+#[derive(Debug, Clone)]
+pub struct Superseded {
+    pub old: Source,
+    pub new: Source,
+}
+
+fn superseded_pages(old: &Illust, new: &Illust) -> Vec<Superseded> {
     old.pages
         .iter()
         .zip(&new.pages)
         .filter(|(o, n)| o.source.url != n.source.url && o.source.filename() == n.source.filename())
-        .map(|(o, _)| o.source.clone())
+        .map(|(o, n)| Superseded {
+            old: o.source.clone(),
+            new: n.source.clone(),
+        })
         .collect()
 }
 
@@ -644,8 +653,8 @@ impl IllustIndex {
 
     // The staged illusts are already applied to `self.map``, we commit them to
     // `self.ids` and the store here. Returns the number of committed illusts
-    // and the superseded sources among them.
-    pub async fn commit(&mut self, stage_id: usize) -> (usize, Vec<Source>) {
+    // and the superseded pages among them.
+    pub async fn commit(&mut self, stage_id: usize) -> (usize, Vec<Superseded>) {
         let the_stage = &mut self.stages[stage_id];
         let stage = std::mem::take(&mut the_stage.todo);
         let cnt = stage.len();
@@ -930,10 +939,16 @@ mod tests {
         );
         let urls = superseded_pages(&old, &new)
             .iter()
-            .map(Source::url)
+            .map(|s| (s.old.url(), s.new.url()))
             .collect_vec();
         // p1 took a new basename, so its old file stays as an orphan.
-        assert_eq!(urls, [format!("{IMG}/04/05/12345678_p0.png")]);
+        assert_eq!(
+            urls,
+            [(
+                format!("{IMG}/04/05/12345678_p0.png"),
+                format!("{IMG}/05/06/12345678_p0.png")
+            )]
+        );
         assert!(superseded_pages(&new, &new).is_empty());
     }
 }

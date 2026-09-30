@@ -2,7 +2,7 @@ use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
 use crate::hook::{DownloadHook, DownloadHookState, EnabledDownloadHookState, NoDownloadHookState};
-use crate::model::{Dimension, Illust, IllustIndex, Source};
+use crate::model::{Dimension, Illust, IllustIndex, Superseded};
 use crate::upscale::Upscaler;
 use actix_web::web::Bytes;
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,7 @@ use itertools::Itertools;
 use parking_lot::{Mutex, RwLock};
 use pixiv::aapi::Restrict;
 use pixiv::client::{AuthedClient, AuthedState};
-use pixiv::download::DownloadClient;
+use pixiv::download::{DownloadClient, versioned_name};
 use pixiv::{IllustId, PageNum};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -360,7 +360,7 @@ impl Pvg {
         stage: usize,
         name: &'static str,
         res: &mut Vec<IllustId>,
-    ) -> Vec<Source> {
+    ) -> Vec<Superseded> {
         {
             let it = index.peek(stage);
             let n = it.len();
@@ -487,23 +487,53 @@ impl Pvg {
         }
     }
 
-    /// Moves the file of each superseded source into `orphan_dir` under its
-    /// versioned name, leaving the plain name for the new version to download
-    /// into. A move that fails keeps the old file as the page's copy.
-    async fn supersede(&self, sources: Vec<Source>) {
-        for src in sources {
-            let file = src.filename();
-            let versioned = pixiv::download::versioned_name(&src.url());
-            match fs::rename(self.page_path(file), self.orphan_path(&versioned)).await {
-                Ok(()) => info!("superseded {file} as {versioned}"),
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
-                Err(e) => {
-                    error!("failed to supersede {file}: {e}");
-                    continue;
-                }
+    /// Fetches the new version of each superseded page into `orphan_dir`, and
+    /// swaps it in when its bytes differ, the old file keeping its versioned
+    /// name there. pixiv re-dates every page of an illust when one page
+    /// changes, so an identical copy is dropped. A failed fetch moves the old
+    /// file aside, and the download queue fetches the page later.
+    async fn supersede(&self, pages: Vec<Superseded>) {
+        for Superseded { old, new } in pages {
+            let file = old.filename();
+            let path = self.page_path(file);
+            if !fs::try_exists(&path).await.unwrap_or(false) {
+                self.disk_lru.write().remove(file);
+                continue;
             }
-            self.disk_lru.write().remove(file);
+            let url = new.url();
+            let fresh = self.orphan_path(versioned_name(&url));
+            let stale = self.orphan_path(versioned_name(&old.url()));
+            let r = match self.do_download_file(&url, &fresh).await {
+                Ok(size) => self.swap_in(file, &fresh, &stale, size).await,
+                Err(e) => {
+                    error!("{file}: fetching the re-upload failed, moving it aside: {e}");
+                    self.move_aside(file, &stale).await
+                }
+            };
+            if let Err(e) = r {
+                error!("{file}: supersede failed: {e}");
+            }
         }
+    }
+
+    async fn swap_in(&self, file: &str, fresh: &Path, stale: &Path, size: u64) -> Result<()> {
+        let path = self.page_path(file);
+        if fs::read(&path).await? == fs::read(fresh).await? {
+            fs::remove_file(fresh).await?;
+            debug!("{file}: re-upload is identical");
+            return Ok(());
+        }
+        self.move_aside(file, stale).await?;
+        fs::rename(fresh, &path).await?;
+        self.disk_lru.write().insert(file.to_owned(), size);
+        info!("superseded {file} as {}", stale.display());
+        Ok(())
+    }
+
+    async fn move_aside(&self, file: &str, stale: &Path) -> Result<()> {
+        fs::rename(self.page_path(file), stale).await?;
+        self.disk_lru.write().remove(file);
+        Ok(())
     }
 
     fn disk_evict(&self, limit: u64) -> Option<String> {
