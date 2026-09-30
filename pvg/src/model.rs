@@ -320,6 +320,7 @@ struct OnlyId {
 /// page file has on disk.
 #[derive(Debug, Clone)]
 pub struct Superseded {
+    pub iid: IllustId,
     pub old: Source,
     pub new: Source,
 }
@@ -330,6 +331,7 @@ fn superseded_pages(old: &Illust, new: &Illust) -> Vec<Superseded> {
         .zip(&new.pages)
         .filter(|(o, n)| o.source.url != n.source.url && o.source.filename() == n.source.filename())
         .map(|(o, n)| Superseded {
+            iid: new.data.id,
             old: o.source.clone(),
             new: n.source.clone(),
         })

@@ -23,6 +23,13 @@ struct ConfigFile {
     bookmark: Option<bool>,
     #[serde(default)]
     download_hook_urls: Vec<String>,
+    peer: Option<PeerConfig>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PeerConfig {
+    pub db: PathBuf,
+    pub pix_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -47,6 +54,7 @@ pub struct Config {
     /// Serves `POST /bookmark`, the one route that writes to the pixiv account.
     pub bookmark: bool,
     pub download_hook_urls: Vec<String>,
+    pub peer: Option<PeerConfig>,
 }
 
 /// Runtime env overrides config.json. Compile-time env is the baked-in fallback.
@@ -122,5 +130,6 @@ pub fn read_config() -> Result<Config> {
         safe_mode: config.safe_mode.unwrap_or(false),
         bookmark: config.bookmark.unwrap_or(false),
         download_hook_urls: config.download_hook_urls,
+        peer: config.peer,
     })
 }

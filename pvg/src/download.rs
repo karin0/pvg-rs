@@ -48,6 +48,25 @@ impl DownloadingFile {
         Ok(())
     }
 
+    /// Fills the file with a copy of `src`. `std::io::copy` between files
+    /// goes through `copy_file_range`, which reflinks on filesystems that
+    /// share extents, such as btrfs.
+    pub async fn copy_from(&mut self, src: &Path) -> io::Result<()> {
+        let Some(ref file) = self.file else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "copy into closed DownloadingFile",
+            ));
+        };
+        let mut dst = file.try_clone().await?.into_std().await;
+        let mut src = fs::File::open(src).await?.into_std().await;
+        let n = tokio::task::spawn_blocking(move || io::copy(&mut src, &mut dst))
+            .await
+            .map_err(io::Error::other)??;
+        self.size += n as usize;
+        Ok(())
+    }
+
     pub async fn commit(mut self, path: &Path, size: Option<u64>) -> Result<u64> {
         drop(self.file.take());
         if let Some(expected) = size {
@@ -199,5 +218,25 @@ impl DownloadingStream {
 
     pub fn stream(self) -> impl Stream<Item = Result<Bytes>> {
         stream::unfold(Some(self), DownloadingStream::fold)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DownloadingFile;
+
+    #[tokio::test]
+    async fn a_copy_commits_the_source_bytes() {
+        let dir = std::env::temp_dir().join(format!("pvg-copy-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let src = dir.join("src.png");
+        std::fs::write(&src, b"original bytes").unwrap();
+        let mut tmp = DownloadingFile::new(dir.join("tmp")).await.unwrap();
+        tmp.copy_from(&src).await.unwrap();
+        let dst = dir.join("dst.png");
+        assert_eq!(tmp.commit(&dst, None).await.unwrap(), 14);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"original bytes");
+        assert!(!dir.join("tmp").exists());
     }
 }
