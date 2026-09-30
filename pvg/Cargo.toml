@@ -75,3 +75,7 @@ fm-bench = ["fm-index"]
 [lib]
 name = "pvg"
 path = "src/lib.rs"
+
+[[example]]
+name = "select_bench"
+required-features = ["search"]
