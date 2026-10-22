@@ -338,7 +338,7 @@ impl Pvg {
     }
 
     async fn quick_update_atomic(&self) -> Result<RwLockWriteGuard<'_, IllustIndex>> {
-        let _ = self.update_lock.try_lock()?;
+        let _update = self.update_lock.try_lock()?;
         let empty = {
             let index = self.index.read().await;
             index.ensure_stage_clean(0)?;
@@ -832,7 +832,7 @@ impl Pvg {
     }
 
     pub async fn download_all(&self) -> Result<u32> {
-        let _ = self.download_all_lock.try_lock()?;
+        let _download = self.download_all_lock.try_lock()?;
         let q = self.make_download_queue().await;
         let (r, dirty_404) = self.do_download_all(q).await?;
         if dirty_404 {
@@ -842,7 +842,7 @@ impl Pvg {
     }
 
     async fn download_all_worker(&self, ids: &[IllustId]) -> Result<(u32, bool)> {
-        let _ = self.download_all_lock.try_lock()?;
+        let _download = self.download_all_lock.try_lock()?;
         let q = self.make_download_queue_from(ids).await;
 
         // The caller is responsible for saving cache.
