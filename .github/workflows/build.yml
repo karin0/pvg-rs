@@ -85,11 +85,11 @@ jobs:
           sqlite3 fav.db < schema.sql
           export DATABASE_URL=sqlite://fav.db?mode=ro
 
-          cargo update
+          cargo fetch --locked
           bash ci.sh
 
           target=${{ matrix.target }}
-          ${CARGO:=cargo} build --release --target $target
+          ${CARGO:=cargo} build --locked --release --target $target
 
           bin=target/$target/release/pvg
           if [[ $target == *windows* ]]; then
