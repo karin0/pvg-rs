@@ -5,7 +5,7 @@ cargo fmt --all --check
 
 clippy() {
     echo "clippy $*" >&2
-    cargo clippy "$@" -- -D clippy::pedantic -D warnings
+    cargo clippy "$@" -- -D clippy::pedantic -D clippy::let_underscore_must_use -D warnings
 }
 
 clippy
