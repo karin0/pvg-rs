@@ -224,7 +224,7 @@ impl Segment {
             .into_iter()
             .map(|(k, s)| {
                 let s = s.as_ref();
-                assert!(!s.is_empty());
+                assert_ne!(s, "");
                 if first {
                     first = false;
                 } else {
