@@ -1,43 +1,12 @@
 use crate::client::{ApiState, Client};
 use crate::endpoint::Endpoint;
-use crate::error::{Error, Result};
+use crate::error::{Result, failure};
 use crate::model::IllustId;
 use log::{debug, error};
 use reqwest::{Method, RequestBuilder, Response};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use strum_macros::IntoStaticStr;
 use url::Url;
-
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorMessages,
-}
-
-#[derive(Deserialize)]
-struct ErrorMessages {
-    #[serde(default)]
-    user_message: String,
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    reason: String,
-}
-
-/// pixiv states a failure in one of three message slots and leaves the rest
-/// empty, escaping any non-ASCII text.
-fn describe(body: String) -> String {
-    match serde_json::from_str::<ErrorEnvelope>(&body) {
-        Ok(env) => {
-            let e = env.error;
-            [e.user_message, e.message, e.reason]
-                .into_iter()
-                .find(|s| !s.is_empty())
-                .unwrap_or(body)
-        }
-        Err(_) => body,
-    }
-}
 
 async fn send(req: RequestBuilder) -> Result<Response> {
     let r = req.send().await?;
@@ -47,7 +16,7 @@ async fn send(req: RequestBuilder) -> Result<Response> {
         Ok(r)
     } else {
         error!("{} from {}", st, r.url());
-        Err(Error::Pixiv(st.as_u16(), describe(r.text().await?)))
+        Err(failure(r).await)
     }
 }
 
