@@ -1,5 +1,4 @@
-use crate::Error;
-use crate::error::Result;
+use crate::error::{Result, failure};
 use log::error;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, Response, header};
@@ -47,7 +46,7 @@ impl DownloadClient {
             Ok(r)
         } else {
             error!("download: {st:?} from {url}");
-            Err(Error::Pixiv(st.as_u16(), r.text().await?))
+            Err(failure(r).await)
         }
     }
 }

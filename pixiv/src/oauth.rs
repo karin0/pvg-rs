@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Result, failure};
 use crate::model::{Response, User};
 use log::debug;
 use md5::{Digest, Md5, digest::Update};
@@ -37,12 +37,11 @@ pub async fn auth(req: RequestBuilder, refresh_token: &str) -> Result<Response> 
         .send()
         .await?;
     let code = res.status().as_u16();
-    let text = res.text().await?;
     debug!("auth: {code}");
     // pixivpy_async
     match code {
-        200 | 301 | 302 => Ok(from_str(&text)?),
-        _ => Err(Error::Pixiv(code, text)),
+        200 | 301 | 302 => Ok(from_str(&res.text().await?)?),
+        _ => Err(failure(res).await),
     }
 }
 
