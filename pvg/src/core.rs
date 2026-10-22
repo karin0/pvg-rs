@@ -1301,6 +1301,5 @@ mod tests {
             disk.insert(file.to_owned(), 1);
         }
         assert_eq!(on_disk(&index, &disk, vec![11, 22]), [11]);
-        std::fs::remove_file(&db).unwrap();
     }
 }
