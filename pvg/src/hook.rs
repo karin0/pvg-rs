@@ -1,7 +1,4 @@
-use itertools::Itertools;
-use pixiv::IllustId;
 use serde_json::Value;
-use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct DownloadHook {
@@ -38,59 +35,5 @@ impl DownloadHook {
                 );
             }
         }
-    }
-}
-
-pub trait DownloadHookState {
-    fn on_downloaded(&mut self, _: IllustId) {}
-
-    fn finish(self) -> Option<Vec<IllustId>>
-    where
-        Self: Sized,
-    {
-        None
-    }
-}
-
-pub struct NoDownloadHookState;
-
-impl DownloadHookState for NoDownloadHookState {}
-
-pub struct EnabledDownloadHookState {
-    iid_order: Vec<IllustId>,
-    downloaded_iids: HashSet<IllustId>,
-}
-
-impl EnabledDownloadHookState {
-    pub fn new<I>(iids: I) -> Self
-    where
-        I: IntoIterator<Item = IllustId>,
-    {
-        let mut iid_seen = HashSet::new();
-        let mut iid_order = Vec::new();
-        for iid in iids {
-            if iid_seen.insert(iid) {
-                iid_order.push(iid);
-            }
-        }
-        Self {
-            iid_order,
-            downloaded_iids: HashSet::new(),
-        }
-    }
-}
-
-impl DownloadHookState for EnabledDownloadHookState {
-    fn on_downloaded(&mut self, iid: IllustId) {
-        self.downloaded_iids.insert(iid);
-    }
-
-    fn finish(self) -> Option<Vec<IllustId>> {
-        Some(
-            self.iid_order
-                .into_iter()
-                .filter(|iid| self.downloaded_iids.contains(iid))
-                .collect_vec(),
-        )
     }
 }

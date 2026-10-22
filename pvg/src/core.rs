@@ -1,7 +1,7 @@
 use crate::config::{Config, read_config};
 use crate::disk_lru::DiskLru;
 use crate::download::{DownloadingFile, DownloadingStream};
-use crate::hook::{DownloadHook, DownloadHookState, EnabledDownloadHookState, NoDownloadHookState};
+use crate::hook::DownloadHook;
 use crate::model::{Dimension, Illust, IllustIndex, Superseded};
 use crate::peer::Peer;
 use crate::upscale::Upscaler;
@@ -114,6 +114,19 @@ fn parse_file<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
             }
         }
     }
+}
+
+/// The illusts among `iids` whose pages are all on disk, the only ones the
+/// download hook may announce.
+fn on_disk(index: &IllustIndex, disk: &DiskLru, iids: Vec<IllustId>) -> Vec<IllustId> {
+    iids.into_iter()
+        .filter(|iid| {
+            index.map[iid]
+                .pages
+                .iter()
+                .all(|page| disk.contains(page.source.filename()))
+        })
+        .collect()
 }
 
 impl Pvg {
@@ -728,27 +741,24 @@ impl Pvg {
         iid: IllustId,
         url: String,
         path: PathBuf,
-    ) -> (IllustId, PathBuf, Result<(u64, Origin)>) {
+    ) -> (PathBuf, Result<(u64, Origin)>) {
         let r = self.do_download_file(iid, &url, &path).await;
-        (iid, path, r)
+        (path, r)
     }
 
-    async fn call_download_hook(&self, downloaded_iids: Vec<IllustId>) {
-        let Some(hook) = &self.download_hook else {
-            return;
-        };
-        info!(
-            "calling download hook for {} illusts",
-            downloaded_iids.len()
-        );
-
-        if downloaded_iids.is_empty() {
-            return;
-        }
-
+    async fn call_download_hook(&self, hook: &DownloadHook, queued: Vec<IllustId>) {
+        let n = queued.len();
         let payload = {
             let index = self.index.read().await;
-            match index.get_raw_illust_jsons(&downloaded_iids).await {
+            let complete = on_disk(&index, &self.disk_lru.read(), queued);
+            info!(
+                "calling download hook for {} of {n} illusts",
+                complete.len()
+            );
+            if complete.is_empty() {
+                return;
+            }
+            match index.get_raw_illust_jsons(&complete).await {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!("download hook: failed to load raw illust batch: {e:?}");
@@ -850,19 +860,6 @@ impl Pvg {
     }
 
     async fn do_download_all(&self, q: Vec<(IllustId, String, PathBuf)>) -> Result<(u32, bool)> {
-        if self.download_hook.is_some() {
-            let hook_state = EnabledDownloadHookState::new(q.iter().map(|(iid, _, _)| *iid));
-            self.do_download_all_with(q, hook_state).await
-        } else {
-            self.do_download_all_with(q, NoDownloadHookState).await
-        }
-    }
-
-    async fn do_download_all_with<H: DownloadHookState>(
-        &self,
-        q: Vec<(IllustId, String, PathBuf)>,
-        mut hook_state: H,
-    ) -> Result<(u32, bool)> {
         if self.lru_limit.is_some() {
             bail!("cache limit is set, refusing to download all");
         }
@@ -872,6 +869,12 @@ impl Pvg {
         }
 
         debug!("{} pages to download", q.len());
+        let queued = self.download_hook.as_ref().map(|hook| {
+            (
+                hook,
+                q.iter().map(|(iid, _, _)| *iid).unique().collect_vec(),
+            )
+        });
         let mut futs = q
             .into_iter()
             .map(|(iid, url, path)| self.download_file(iid, url, path))
@@ -883,7 +886,7 @@ impl Pvg {
         let mut cnt_copied: u32 = 0;
         let mut the_404 = vec![];
         let t0 = Instant::now();
-        while let Some((iid, path, res)) = futs.next().await {
+        while let Some((path, res)) = futs.next().await {
             cnt += 1;
             match res {
                 Ok((size, origin)) => {
@@ -901,7 +904,6 @@ impl Pvg {
                     self.disk_lru
                         .write()
                         .insert(path.file_name().unwrap().to_str().unwrap().to_owned(), size);
-                    hook_state.on_downloaded(iid);
                 }
                 Err(e) => {
                     cnt_fail += 1;
@@ -929,8 +931,8 @@ impl Pvg {
             }
         }
 
-        if let Some(downloaded_iids) = hook_state.finish() {
-            self.call_download_hook(downloaded_iids).await;
+        if let Some((hook, queued)) = queued {
+            self.call_download_hook(hook, queued).await;
         }
 
         if cnt_fail > 0 {
@@ -1265,5 +1267,40 @@ impl Pvg {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMG: &str = "https://i.pximg.net/img-original/img/2024/01/02/03/04/05";
+
+    fn raw(iid: IllustId, pages: usize) -> Value {
+        serde_json::json!({
+            "id": iid, "title": "t", "width": 1, "height": 1,
+            "user": {"id": 1, "name": "u", "account": "u"},
+            "meta_single_page": {}, "page_count": pages,
+            "meta_pages": (0..pages)
+                .map(|pn| serde_json::json!({"image_urls": {"original": format!("{IMG}/{iid}_p{pn}.png")}}))
+                .collect_vec(),
+            "tags": [], "sanity_level": 2, "x_restrict": 0, "visible": true,
+            "create_date": "", "caption": "", "is_bookmarked": true, "type": "illust",
+        })
+    }
+
+    #[tokio::test]
+    async fn the_hook_skips_an_illust_with_a_page_missing() {
+        let db = std::env::temp_dir().join(format!("pvg-hook-{}.db", std::process::id()));
+        _ = std::fs::remove_file(&db);
+        let mut index = IllustIndex::connect(&db, true, true).await.unwrap();
+        index.stage(0, raw(11, 2)).unwrap();
+        index.stage(0, raw(22, 2)).unwrap();
+        let mut disk = DiskLru::default();
+        for file in ["11_p0.png", "11_p1.png", "22_p1.png"] {
+            disk.insert(file.to_owned(), 1);
+        }
+        assert_eq!(on_disk(&index, &disk, vec![11, 22]), [11]);
+        std::fs::remove_file(&db).unwrap();
     }
 }
