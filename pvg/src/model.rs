@@ -165,7 +165,7 @@ pub struct IllustIndex {
     store: Store,
     pub map: HashMap<IllustId, Illust>,
     pub srv: IllustService,
-    ids: Vec<IllustId>, // TODO: store pointers to speed up?
+    ids: Vec<IllustId>,
     stages: [IllustStage; 2],
     #[cfg(feature = "search")]
     sa: SearchIndex,
@@ -366,7 +366,6 @@ impl IllustIndex {
         let map = illusts
             .into_iter()
             .map(|data| {
-                // FIXME: do not unwrap
                 let o = Illust::from_bytes(&data, &mut srv, true)?;
                 if o.deleted {
                     deleted += 1;

@@ -330,7 +330,6 @@ impl Pvg {
                         break x;
                     }
                     Err(e) => {
-                        // TODO: this is flawed
                         if e.to_string().to_ascii_lowercase().contains("rate limit") {
                             warn!("rate limited, sleeping for 60 secs");
                             sleep(Duration::from_mins(1)).await;
@@ -484,9 +483,6 @@ impl Pvg {
         if fs::metadata(&out_path).await.is_ok() {
             return Ok(out_path);
         }
-        // TODO: manage space of upscaled files in lru cache
-        // TODO: download if source doesn't exist
-        // TODO: handle if already started
         let upscaler = self.upscaler.as_ref().context("no upscaler configured")?;
         upscaler.run(file, out_file, scale).await?;
         Ok(out_path)
@@ -494,7 +490,6 @@ impl Pvg {
 
     async fn open_temp(&self, path: &Path) -> Result<DownloadingFile> {
         let tmp_path = self.conf.tmp_dir.join(path.file_name().unwrap());
-        // TODO: this fails if a file is requested twice before it's downloaded, do some waiting.
         DownloadingFile::new(tmp_path).await
     }
 
