@@ -12,7 +12,7 @@ clippy
 clippy --no-default-features
 
 if [ "$(uname -s)" = "Linux" ]; then
-  ext=rename2,io-uring
+  ext=rename2
   clippy --no-default-features --features $ext
 else
   ext=

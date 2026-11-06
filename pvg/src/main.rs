@@ -17,6 +17,7 @@ use pvg::util::normalized;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::io;
+use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 #[macro_use]
@@ -26,6 +27,13 @@ extern crate log;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+/// Opens the file on the blocking thread pool, so the workers keep serving other requests.
+async fn open(path: PathBuf) -> io::Result<NamedFile> {
+    web::block(move || NamedFile::open(path))
+        .await
+        .map_err(io::Error::other)?
+}
+
 #[get("/img/{iid}/{pn}")]
 async fn image(
     app: web::Data<Pvg>,
@@ -34,12 +42,12 @@ async fn image(
     let app = app.into_inner();
     let (iid, pn) = path.into_inner();
     match app.get_source(iid, pn).await {
-        Some((src, path)) => match NamedFile::open_async(&path).await {
+        Some((src, path)) => match open(path.clone()).await {
             Ok(f) => Ok(Either::Left(f)),
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
                     if app.adopt_page(iid, &src, &path).await {
-                        return Ok(Either::Left(NamedFile::open_async(&path).await?));
+                        return Ok(Either::Left(open(path).await?));
                     }
                     let resp = app.download(&src, path).await.map_err(mapper)?;
                     Ok(Either::Right(
@@ -160,7 +168,7 @@ async fn do_upscale(app: web::Data<Pvg>, form: web::Form<UpscaleForm>) -> io::Re
         .upscale(form.pid, form.ind, scale)
         .await
         .map_err(mapper)?;
-    NamedFile::open_async(path).await
+    open(path).await
 }
 
 const STATIC_PATH_PREFIX: &str = "/s/";

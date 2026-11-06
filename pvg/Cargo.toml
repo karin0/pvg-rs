@@ -20,7 +20,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-actix-files = "0.6"
+actix-files = "0.7"
 parking_lot = "0.12"
 actix-cors = "0.7"
 ctrlc = { version = "3", features = ["termination"] }
@@ -59,7 +59,6 @@ vergen-gitcl = { version = "10", features = ["build"] }
 default = ["sa-packed", "fm-index"]
 
 rename2 = ["dep:nix"]
-io-uring = ["actix-files/experimental-io-uring"]
 diff = ["dep:similar"]
 search = ["dep:bio", "dep:fixedbitset", "dep:integer-sqrt"]
 sa-packed = ["search", "dep:packedvec"]
