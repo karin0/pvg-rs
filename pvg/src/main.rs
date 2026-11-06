@@ -254,7 +254,10 @@ async fn main() -> Result<()> {
             warn!("is shutting down");
         }
     })?;
-    let data = web::Data::new(Pvg::new().await?);
+    let config = std::env::args_os()
+        .nth(1)
+        .unwrap_or_else(|| "config.json".into());
+    let data = web::Data::new(Pvg::new(config.as_ref()).await?);
     let pvg = data.clone().into_inner();
 
     if pvg.is_worker() {

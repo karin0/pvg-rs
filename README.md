@@ -38,6 +38,7 @@ Explore, filter, and download artworks from your [pixiv](https://www.pixiv.net/)
     }
     ```
 - Run `pvg` or `pvg.exe` to start the server
+  - `pvg <path>` reads the config file at `<path>` instead
 - Open the URL shown in the terminal (Ctrl-click) in your browser
   - Typically http://127.0.0.1:5678
 
@@ -47,7 +48,7 @@ The following options can be specified in `config.json`:
 
 - `username`: Your pixiv username (required)
 - `refresh_token`: Your pixiv refresh token
-  - `PIXIV_REFRESH_TOKEN` environment variable takes precedence. Either must present.
+  - The `PIXIV_REFRESH_TOKEN` environment variable takes precedence, and one of the two must be set.
 - `port`: Port to listen on (default: `5678`)
 - `host`: Interface to listen on (default: `"127.0.0.1"`)
   - Specify a LAN address or `"0.0.0.0"` to allow access from network

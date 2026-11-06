@@ -130,9 +130,9 @@ fn on_disk(index: &IllustIndex, disk: &DiskLru, iids: Vec<IllustId>) -> Vec<Illu
 }
 
 impl Pvg {
-    pub async fn new() -> Result<Pvg> {
+    pub async fn new(config: &Path) -> Result<Pvg> {
         let t = Instant::now();
-        let mut config = read_config()?;
+        let mut config = read_config(config)?;
         let refresh_token = std::mem::replace(&mut config.refresh_token, "*".to_owned());
         info!("config: {config:?}");
 

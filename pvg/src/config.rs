@@ -57,13 +57,12 @@ pub struct Config {
     pub peer: Option<PeerConfig>,
 }
 
-/// Runtime env overrides config.json. Compile-time env is the baked-in fallback.
+/// The environment overrides the config file.
 fn refresh_token(config: Option<String>) -> Result<String> {
     env::var("PIXIV_REFRESH_TOKEN")
         .ok()
         .or(config)
-        .or_else(|| option_env!("PIXIV_REFRESH_TOKEN").map(str::to_owned))
-        .context("no refresh token: set PIXIV_REFRESH_TOKEN or refresh_token in config.json")
+        .context("no refresh token: set PIXIV_REFRESH_TOKEN or refresh_token in the config file")
 }
 
 fn ensure_dir(dir: &Path) {
@@ -86,8 +85,8 @@ fn ensure_empty_dir(dir: PathBuf) -> PathBuf {
     dir
 }
 
-pub fn read_config() -> Result<Config> {
-    let config = fs::read_to_string("config.json")?;
+pub fn read_config(path: &Path) -> Result<Config> {
+    let config = fs::read_to_string(path).with_context(|| path.display().to_string())?;
     let config: ConfigFile = from_str(&config)?;
 
     let home = &config.home;
