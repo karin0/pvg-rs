@@ -26,7 +26,7 @@ actix-cors = "0.7"
 ctrlc = { version = "3", features = ["termination"] }
 futures = "0"
 itertools = "0.15"
-lru = "0.18"
+lru = "0.19"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "macros"] }
 unicode-normalization = "0.1"
 lz4 = "1"
