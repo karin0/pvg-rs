@@ -21,7 +21,7 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 actix-files = "0.7"
-parking_lot = "0.12"
+parking_lot = "0.13"
 actix-cors = "0.7"
 ctrlc = { version = "3", features = ["termination"] }
 futures = "0"
