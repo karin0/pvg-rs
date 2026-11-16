@@ -48,7 +48,7 @@ packedvec = { version = "2", optional = true }
 nix = { version = "0.31", features = ["fs"], optional = true }
 dhat = { version = "0.3", optional = true }
 
-pretty_env_logger = { git = "https://github.com/karin0/pretty-env-logger.git" }
+krr-logger = { git = "https://github.com/karin0/krr-logger.git" }
 pixiv = { path = "../pixiv" }
 
 [build-dependencies]

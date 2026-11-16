@@ -214,16 +214,7 @@ async fn main() -> Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
 
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "warn,pvg=info,pixiv=info");
-        }
-    }
-    if std::env::var("JOURNAL_STREAM").is_ok() {
-        pretty_env_logger::init();
-    } else {
-        pretty_env_logger::init_timed();
-    }
+    krr_logger::init!("warn,pvg=info,pixiv=info")?;
 
     info!(
         "{} {} ({VERSION}) with {FEATURES} opt {}{} rustc {} for {} on {} at {}",
