@@ -1081,7 +1081,7 @@ impl Pvg {
             },
         );
 
-        let r = Self::_select(&index, r);
+        let r = Self::selected_illusts(&index, r);
 
         let now2 = Instant::now();
         let dt = now2 - now;
@@ -1100,7 +1100,7 @@ impl Pvg {
         Ok(r)
     }
 
-    fn _select<'a>(
+    fn selected_illusts<'a>(
         index: &'a IllustIndex,
         r: impl DoubleEndedIterator<Item = &'a Illust>,
     ) -> Vec<SelectedIllust<'a>> {
