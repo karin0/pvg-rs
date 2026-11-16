@@ -25,4 +25,3 @@ features = ["json", "stream", "query", "form", "brotli", "gzip"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
-pretty_env_logger = "0"
